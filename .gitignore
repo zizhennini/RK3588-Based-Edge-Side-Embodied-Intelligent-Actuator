@@ -1,0 +1,4 @@
+
+# 超大文件（移出Git跟踪）
+scripts/demo_src/3rdparty.zip
+scripts/demo_src/3rdparty/opencv/
