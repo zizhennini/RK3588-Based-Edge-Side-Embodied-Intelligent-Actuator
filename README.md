@@ -111,6 +111,7 @@ python -c "from astra import AstraProCamera; c=AstraProCamera(21); c.connect(); 
 | **Qwen3-VL-2B** | `qwen3-vl-2b` | ~2.5GB | 5-8s/次 | 16GB / 8GB |
 | InternVL2-1B | `internvl2-1b` | ~1GB | 2-3s/次 | 8GB/16GB |
 | Qwen2.5-VL-3B | `qwen2.5-vl-3b` | ~3GB | 6-10s/次 | 16GB |
+| SmolVLM-256M |  | 256M | 1s/每次 | 8G |
 
 切换：改 `config/settings.py` 中 `VLM_MODEL_NAME`。
 
@@ -150,3 +151,4 @@ python scripts/monitor.py       # 资源监控
 
 可用命令：`lerobot-teleoperate` `lerobot-calibrate` `lerobot-find-port`
 `lerobot-find-cameras` `lerobot-setup-motors` `lerobot-info`
+

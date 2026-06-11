@@ -2,3 +2,21 @@
 # 超大文件（移出Git跟踪）
 scripts/demo_src/3rdparty.zip
 scripts/demo_src/3rdparty/opencv/
+
+# 二进制库文件
+*.a
+*.so
+*.o
+*.bin
+*.whl
+*.zip
+*.caffemodel
+
+# 模型文件
+tokenizer.json
+tokenizer.model
+
+# 运行时库
+scripts/demo/
+rknn-llm-release-v1.2.3/
+models/
