@@ -16,7 +16,11 @@ scripts/demo_src/3rdparty/opencv/
 tokenizer.json
 tokenizer.model
 
+# 模型二进制
+*.rkllm
+*.rknn
+
 # 运行时库
 scripts/demo/
 rknn-llm-release-v1.2.3/
-models/
+models/Qwen3-VL-2B/
