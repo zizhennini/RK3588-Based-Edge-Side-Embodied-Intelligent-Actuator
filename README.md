@@ -2,134 +2,122 @@
 
 **Embedded Intelligent Actuator** — 端侧具身智能执行器
 
+RK3588 NPU 端侧部署 VLA（Vision-Language-Action），使用 LeRobot + VLM + Astra Pro + SO-ARM101 实现自主抓取搬运。
+
 ---
 
-## 项目资源索引
+## 资源索引
 
 | 资源 | 链接 |
 |------|------|
 | LeRobot v0.4.4 | https://github.com/huggingface/lerobot/tree/v0.4.4 |
 | Orbbec SDK v1 (arm64) | https://github.com/orbbec/OrbbecSDK/releases/tag/v1.10.27 |
-| MobileNet-SSD (Caffe) | https://github.com/chuanqi305/MobileNet-SSD |
 | RKLLM 工具链 | https://github.com/airockchip/rknn-llm |
 | RKLLM 模型仓库 | https://console.box.lenovo.com/l/l0tXb8 (提取码: rkllm) |
-| RK3588 NPU 文档 | https://www.rock-chips.com/a/en/products/RK35_Series/2022/0926/1676.html |
-| SO-ARM101 机械臂 | https://github.com/TheRobotStudio/SO-ARM100 |
-| 奥比中光 Astra Pro | https://shop.orbbec.com/products/astra-pro |
 | 嵌赛官网 | https://www.socchina.net/ |
+| 瑞芯微赛题解读 | https://mp.weixin.qq.com/s/W_yiAElw6HTVnroYEp3pmg |
+| SO-ARM100 机械臂 | https://github.com/TheRobotStudio/SO-ARM100 |
+| whisper.cpp (端侧语音) | 🎤 CPU 语音识别，50K ⭐ | https://github.com/ggml-org/whisper.cpp |
+
+### VLM 模型资源
+
+| 模型 | 说明 | 链接 |
+|------|------|------|
+| **SmolVLM2-500M-vqa-position** ⭐ | **机器人抓取微调版，输出坐标+颜色** | https://huggingface.co/robot-learning-group47/smolvlm2-500m-vqa-init-position-strict10-color-slot-merged |
+| SmolVLM2-500M-color-aware | 机器人物体识别（颜色感知） | https://huggingface.co/robot-learning-group47/smolvlm2-500m-color-aware |
+| SmolVLM-256M-Instruct | 通用 VLM（RKLLM 已验证） | https://huggingface.co/HuggingFaceTB/SmolVLM-256M-Instruct |
+| Qwen3-VL-2B-Instruct | 通用 VLM（已在 RK3588 跑通） | https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct |
+| InternVL2-1B | 轻量 VLM | https://huggingface.co/OpenGVLab/InternVL2-1B |
 
 ---
 
 ## 架构
 
 ```
-Astra Pro ─┬── RGB (OpenCV) ──► VLM (RKLLM NPU) ──► "拿红色杯子"
-           │                    Qwen3-VL-2B / InternVL2-1B
-           │                               ↓
-           │                        Prompt 解析器
-           │                        {object:"bottle", color:"red"}
-           │                               ↓
-           └── RGB (OpenCV) ──► MobileNet SSD (CPU) ──► 检测 "bottle"
-                                              │
-                                              ▼
-                                         找对应检测框 → HSV 验证颜色
-                                              │
-                                         ┌────┴────┐
-                                         ▼         ▼
-                                      匹配     不匹配 → ColorLocator 降级
-                                         │
-                                         ▼
-Astra Pro ── Depth (C++ SDK) ──► (cx, cy) + Depth z
-                                         │
-                                         ▼
-                                    IK 解算 → SO-ARM101 执行
+Astra Pro ─┬── RGB ──► VLM (RKLLM NPU) ──► "红色 杯子"
+           │              ~1-5s/次
+           │                   ▲
+           │                   │ 确认
+           │              ┌────┴────┐
+           │         🎤 语音 → whisper.cpp ──► "抓红色杯子"
+           │              (CPU, ~200ms)
+           │                   │
+           │                   ▼
+           │              ColorLocator (CPU) ──► (u,v)
+           │                                     ↓
+           └── Depth ───────────────────────► z 值查表
+                                                    ↓
+                                               3D 坐标 (x,y,z)
+                                                    ↓
+                                              IK → SO-ARM101 执行
 ```
+
+**定位方案**（二选一）：
+- **ColorLocator**：颜色分割定位（CPU < 5%，无需额外模型）
+- **VLM 直出坐标**：VLM 输出 cx,cy（需微调版 VLM）
+
+---
 
 ## 项目结构
 
 ```
 RK3588-EIA/
-├── lerobot/              # LeRobot v0.4.4（遥操作必需模块）
+├── lerobot/              # LeRobot v0.4.4（遥操作模块）
 ├── astra/                # Astra Pro 相机封装
 ├── vla/                  # VLA 核心系统
-│   ├── vlm/              # 通用 VLM 框架（3个引擎：Qwen3/InternVL2/Qwen2.5）
-│   ├── vision/           # MobileNet SSD + ColorLocator
+│   ├── vlm/              # 通用 VLM 框架（5个引擎）
+│   ├── vision/           # ColorLocator 颜色定位
 │   ├── control/          # IK + Feetech 串口
 │   └── pipe/             # 流水线 FSM
 ├── config/settings.py    # 统一配置
 ├── models/
-│   ├── Qwen3-VL-2B/      # VLM 模型（rknn + rkllm）
-│   └── MobileNetSSD/     # SSD 模型（prototxt + caffemodel）
-├── scripts/demo/         # RKLLM 多模态推理可执行文件
-├── main.py
+│   ├── Qwen3-VL-2B/      # Qwen3-VL-2B 模型
+│   ├── SmolVLM-256M/     # SmolVLM-256M 模型
+│   └── so101_urdf/       # SO-ARM101 URDF（placo IK）
+├── scripts/
+│   ├── demo/             # RKLLM 推理二进制
+│   ├── camera_viewer.py  # 实时取景+VLM 推理
+│   └── test_pipeline.py  # VLM+相机 联调
+├── main.py               # 主入口
 └── docs/
 ```
 
 ---
 
-## RK3588 完整安装
+## 快速开始
 
 ```bash
-# ── 1. 系统依赖 ──
-sudo apt install -y python3-pip python3-opencv python3-serial cmake build-essential wget unzip
-
-# ── 2. Orbbec SDK（Depth 采集） ──
-wget https://github.com/orbbec/OrbbecSDK/releases/download/v1.10.27/OrbbecSDK_C_C%2B%2B_v1.10.27_20250925_0549823_linux_arm64_release.zip
-unzip OrbbecSDK_C_C++_v1.10.27_20250925_0549823_linux_arm64_release.zip
-cd OrbbecSDK_C_C++_v1.10.27_20250925_0549823_linux_arm64_release
-sudo cp -r lib/* /usr/local/lib/ && sudo cp -r include/* /usr/local/include/ && sudo ldconfig
-cd Script && sudo ./install_udev_rules.sh && sudo udevadm control --reload && sudo udevadm trigger
-cd ../..
-
-# ── 3. LeRobot ──
+# 安装 LeRobot
 cd lerobot && pip install -e .[feetech] && cd ..
 
-# ── 4. 项目依赖 ──
+# 安装项目依赖
 pip install -r requirements.txt
 
-# ── 5. MobileNet SSD ──
-python scripts/download_mobilenet.py
-
-# ── 6. 编译 astra_capture ──
-cd astra && g++ -std=c++17 capture.cpp -I/usr/local/include -L/usr/local/lib -lOrbbecSDK -lpthread -o build/astra_capture && cd ..
-
-# ── 7. RKLLM Runtime ──
+# 安装 RKLLM Runtime
 sudo cp scripts/demo/demo /usr/bin/
-sudo cp scripts/demo/lib/librkllmrt.so /usr/local/lib/
+sudo cp scripts/demo/lib/*.so /usr/lib/
 sudo ldconfig
 
-# ── 8. 验证 ──
-python -c "from astra import AstraProCamera; c=AstraProCamera(21); c.connect(); r,d=c.read(); print(f'RGB:{r.shape} Depth:{d.shape}'); c.disconnect()"
+# 启动相机实时取景（按 Enter 触发 VLM）
+python scripts/camera_viewer.py
+
+# 启动 VLA 自主抓取（接好机械臂）
+python main.py
 ```
 
 ---
 
-## VLM 模型
+## VLM 模型对比
 
-| 模型 | 配置名 | 内存 | 推理速度 | 硬件 |
-|------|--------|------|---------|------|
-| **Qwen3-VL-2B** | `qwen3-vl-2b` | ~2.5GB | 5-8s/次 | 16GB / 8GB |
-| InternVL2-1B | `internvl2-1b` | ~1GB | 2-3s/次 | 8GB/16GB |
-| Qwen2.5-VL-3B | `qwen2.5-vl-3b` | ~3GB | 6-10s/次 | 16GB |
-| SmolVLM-256M |  | 256M | 1s/每次 | 8G |
+| 模型 | 参数量 | 推理速度 | 内存 | 定位方式 | 状态 |
+|------|--------|---------|------|---------|------|
+| **SmolVLM2-500M-vqa-position** ⭐ | 500M | ~2s | <1GB | **直接输出坐标** | 🔍 待测试 |
+| Qwen3-VL-2B | 2B | ~5s | 2.5GB | 文本描述 | ✅ 已跑通 |
+| SmolVLM-256M | 256M | ~1.3s | <1GB | 文本描述 | ✅ 已跑通 |
+| InternVL2-1B | 1B | ~2s | 1GB | 文本描述 | ⚪ 待测试 |
+| SmolVLM2-500M-color | 500M | ~2s | <1GB | 颜色识别 | 🔍 待测试 |
 
-切换：改 `config/settings.py` 中 `VLM_MODEL_NAME`。
-
-### 模型部署
-
-Qwen3-VL-2B 需要两个文件（从 model zoo 下载）：
-```
-models/Qwen3-VL-2B/
-├── qwen3-vl-2b_vision_rk3588.rknn         # 视觉编码器
-└── qwen3-vl-2b-instruct_w8a8_rk3588.rkllm # 语言模型
-```
-
-以及 RKLLM Runtime（从 SDK 下载）：
-```bash
-sudo cp scripts/demo/demo /usr/bin/
-sudo cp scripts/demo/lib/librkllmrt.so /usr/local/lib/
-sudo ldconfig
-```
+---
 
 ## 标定
 
@@ -139,16 +127,7 @@ python scripts/calibrate_handeye.py
 lerobot-calibrate --robot.type=so101_follower --robot.port=/dev/ttyUSB0
 ```
 
-## 快速开始
+## LeRobot 命令
 
-```bash
-bash scripts/teleop.sh          # 遥操作
-bash scripts/run_vla.sh         # VLA 抓取
-python scripts/monitor.py       # 资源监控
-```
-
-## LeRobot
-
-可用命令：`lerobot-teleoperate` `lerobot-calibrate` `lerobot-find-port`
+`lerobot-teleoperate` `lerobot-calibrate` `lerobot-find-port`
 `lerobot-find-cameras` `lerobot-setup-motors` `lerobot-info`
-
