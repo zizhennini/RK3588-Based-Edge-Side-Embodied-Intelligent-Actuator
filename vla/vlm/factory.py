@@ -16,6 +16,7 @@ VLM_REGISTRY = {
     "qwen3-vl-2b": Qwen3VLEngine,
     "smolvlm2": SmolVLM2Engine,
     "smolvlm2-256m": SmolVLM2Engine,
+    "smolvlm-500m": SmolVLM2Engine,
 }
 
 
