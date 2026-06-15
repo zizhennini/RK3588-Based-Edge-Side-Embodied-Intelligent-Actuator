@@ -39,20 +39,16 @@ def main():
             rgb, depth = cam.read()
 
             if voice._ready:
-                inp = input("按 Enter 录音指令, 或输入文字指令, q 退出: ")
+                inp = input("按 Enter 实时录音, 或输入文字指令, q 退出: ")
             else:
                 inp = input("输入指令 (如 \"抓红色杯子\"), q 退出: ")
 
             if inp.lower() == "q":
                 break
-            if not inp.strip():
-                continue
 
-            # 检查是否为语音指令（用户输入的是音频路径）
-            if inp.startswith("/audio/") and os.path.exists(inp) and voice._ready:
-                print("🎤 语音识别中...")
-                text = voice.listen(inp)
-                cmd = voice.parse_command(text)
+            if not inp.strip() and voice._ready:
+                print("🎤 录音 3 秒，请说话...")
+                cmd = voice.record_and_parse(duration=3)
             else:
                 # 文字指令直接解析
                 cmd = voice.parse_command(inp)
