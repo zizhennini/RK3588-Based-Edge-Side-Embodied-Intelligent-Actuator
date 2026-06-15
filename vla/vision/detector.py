@@ -69,16 +69,16 @@ class MobileNetSSD:
             best = max(dets, key=lambda d: d["confidence"])
             return self._to_3d(best, depth)
 
-        # 按颜色筛选：在检测框内取 HSV 平均值验证
+        # 按颜色筛选：在检测框内取 HSV 中位数验证
         hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
         for det in sorted(dets, key=lambda d: d["confidence"], reverse=True):
             x1, y1, x2, y2 = det["box"]
             roi = hsv[y1:y2, x1:x2]
             if roi.size == 0:
                 continue
-            avg_hue = np.mean(roi[:, :, 0])
+            median_hue = np.median(roi[:, :, 0])
             lower, upper = color_locator.COLOR_RANGES.get(target_color, [(0, 0, 0), (180, 255, 255)])
-            if lower[0] <= avg_hue <= upper[0]:
+            if lower[0] <= median_hue <= upper[0]:
                 return self._to_3d(det, depth)
 
         # 颜色没匹配上，返回置信度最高的

@@ -5,8 +5,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from config.settings import (
     CAMERA_MATRIX, VLM_MODEL_NAME, VLM_MODEL_PATH, VLM_DEMO_BIN,
-    SSD_PROTOTXT, SSD_CAFFEMODEL, SSD_CONFIDENCE,
 )
+
+SSD_PROTOTXT = "./models/MobileNetSSD/MobileNetSSD_deploy.prototxt"
+SSD_CAFFEMODEL = "./models/MobileNetSSD/MobileNetSSD_deploy.caffemodel"
+SSD_CONFIDENCE = 0.5
 from astra import AstraProCamera
 from vla.vlm import create_vlm
 from vla.vision import MobileNetSSD, ColorLocator

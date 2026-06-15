@@ -33,7 +33,8 @@ class VoiceControl:
             "--print-progress", "false",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        text = result.stdout.strip().split("\n")[-1] if result.stdout else ""
+        lines = [ln.strip() for ln in result.stdout.strip().split("\n") if ln.strip()]
+        text = lines[-1] if lines else ""
         return text
 
     def parse_command(self, text: str) -> dict | None:

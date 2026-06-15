@@ -67,18 +67,18 @@ class ArmController:
             self._write_angle(sid, float(np.deg2rad(angles_deg[sid - 1])))
 
     def _read_current_pos(self) -> np.ndarray:
-        return np.zeros(7)
+        return np.zeros(len(self.JOINT_NAMES))
 
     def _write_angle(self, sid: int, rad: float):
         pulse = int(500 + rad / np.pi * 500)
         pulse = max(0, min(1000, pulse))
-        cmd = struct.pack("<BBBBHBH", 0xFF, 0xFF, sid, 7, 0x03, 0x2A, pulse)
+        cmd = struct.pack("<BBBBBBH", 0xFF, 0xFF, sid, 5, 0x03, 0x2A, pulse)
         checksum = (~sum(cmd[2:]) & 0xFF)
         self.ser.write(cmd + struct.pack("<B", checksum))
 
     def gripper(self, open: bool):
         pulse = 400 if open else 200
-        cmd = struct.pack("<BBBBHBH", 0xFF, 0xFF, 6, 7, 0x03, 0x2A, pulse)
+        cmd = struct.pack("<BBBBBBH", 0xFF, 0xFF, 6, 5, 0x03, 0x2A, pulse)
         cks = (~sum(cmd[2:]) & 0xFF)
         self.ser.write(cmd + struct.pack("<B", cks))
 

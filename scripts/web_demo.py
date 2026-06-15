@@ -35,15 +35,12 @@ def vlm_infer():
 
 
 def grasp(color: str):
-    rgb = capture_frame()
-    if rgb is None:
-        return "相机失败"
-    cam2 = AstraProCamera(21)
-    cam2.connect()
-    rgb2, depth = cam2.read()
-    cam2.disconnect()
+    cam = AstraProCamera(21)
+    cam.connect()
+    rgb, depth = cam.read()
+    cam.disconnect()
     locator = ColorLocator(CAMERA_MATRIX)
-    pos = locator.locate(rgb2, depth, color)
+    pos = locator.locate(rgb, depth, color)
     if pos is None:
         return f"未找到{color}色物体"
     arm = ArmController(SERIAL_PORT, SERIAL_BAUD)
@@ -54,7 +51,7 @@ def grasp(color: str):
     arm.move_to(0.30, 0.0, 0.10)
     arm.gripper(True)
     arm.close()
-    return f"✅ 抓取完成 @ ({pos['x']:.2f},{pos['y']:.2f},{pos['z']:.2f})"
+    return f"抓取完成 @ ({pos['x']:.2f},{pos['y']:.2f},{pos['z']:.2f})"
 
 
 def create_ui():

@@ -7,7 +7,7 @@ from .base import VLMBase, VLMResult
 
 COLORS = {
     "红色": ["红", "red"], "绿色": ["绿", "green"], "蓝色": ["蓝", "blue"],
-    "黄色": ["黄", "yellow"], "白色": ["白", "white", "白色"], "黑色": ["黑", "black"],
+    "黄色": ["黄", "yellow"],     "白色": ["白", "white"], "黑色": ["黑", "black"],
     "橙色": ["橙", "orange"], "紫色": ["紫", "purple"], "灰色": ["灰", "gray"],
 }
 

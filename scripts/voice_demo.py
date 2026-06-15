@@ -48,12 +48,14 @@ def main():
             if not inp.strip():
                 continue
 
-            # 解析指令（文字或语音）
-            cmd = voice.parse_command(inp)
-            if cmd is None and voice._ready:
-                print("🎤 识别中...")
+            # 检查是否为语音指令（用户输入的是音频路径）
+            if inp.startswith("/audio/") and os.path.exists(inp) and voice._ready:
+                print("🎤 语音识别中...")
                 text = voice.listen(inp)
                 cmd = voice.parse_command(text)
+            else:
+                # 文字指令直接解析
+                cmd = voice.parse_command(inp)
 
             if cmd is None:
                 print("  未识别到有效指令，试试: 抓红色杯子")
