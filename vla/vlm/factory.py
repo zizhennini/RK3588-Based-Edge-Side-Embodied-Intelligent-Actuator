@@ -4,6 +4,7 @@ from .internvl2 import InternVL2Engine
 from .qwen_vl import QwenVLEngine
 from .qwen3_vl import Qwen3VLEngine
 from .smolvlm2 import SmolVLM2Engine
+from .smolvlm2_500m import SmolVLM2_500MEngine
 
 
 VLM_REGISTRY = {
@@ -16,7 +17,8 @@ VLM_REGISTRY = {
     "qwen3-vl-2b": Qwen3VLEngine,
     "smolvlm2": SmolVLM2Engine,
     "smolvlm2-256m": SmolVLM2Engine,
-    "smolvlm-500m": SmolVLM2Engine,
+    "smolvlm-500m": SmolVLM2_500MEngine,
+    "smolvlm2-500m": SmolVLM2_500MEngine,
 }
 
 

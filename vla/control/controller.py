@@ -24,7 +24,7 @@ class ArmController:
     def _init_ik(self, urdf_path: str):
         try:
             from .kinematics import RobotKinematics
-            kin = RobotKinematics(urdf_path, target_frame_name="gripper")
+            kin = RobotKinematics(urdf_path, target_frame_name="gripper_frame_link")
             print(f"  IK: 官方 placo (URDF={urdf_path})")
             return kin
         except Exception as e:

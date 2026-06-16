@@ -10,6 +10,7 @@ from config.settings import VLM_MODEL_NAME, VLM_MODEL_PATH, VLM_DEMO_BIN
 
 inferring = False
 result_text = ""
+WINDOW_SCALE = 1.8  # 显示缩放倍率
 
 def do_inference(vlm, rgb):
     global inferring, result_text
@@ -47,6 +48,9 @@ def main():
                 cv2.putText(frame, "推理中...", (10, 60),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
+            if WINDOW_SCALE != 1.0:
+                h, w = frame.shape[:2]
+                frame = cv2.resize(frame, (int(w * WINDOW_SCALE), int(h * WINDOW_SCALE)))
             cv2.imshow("RK3588-EIA", frame)
             key = cv2.waitKey(1) & 0xFF
 
