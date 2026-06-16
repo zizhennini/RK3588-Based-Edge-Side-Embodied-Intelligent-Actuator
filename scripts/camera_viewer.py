@@ -4,13 +4,13 @@ import sys, os, threading
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import cv2
-from astra import AstraProCamera
+from astra import USBCamera
 from vla.vlm import create_vlm
-from config.settings import VLM_MODEL_NAME, VLM_MODEL_PATH, VLM_DEMO_BIN
+from config.settings import VLM_MODEL_NAME, VLM_MODEL_PATH, VLM_DEMO_BIN, CAMERA_INDEX
 
 inferring = False
 result_text = ""
-WINDOW_SCALE = 1.8  # 显示缩放倍率
+WINDOW_SCALE = 1.2  # 显示缩放倍率（640x480 放大到 768x576）
 
 def do_inference(vlm, rgb):
     global inferring, result_text
@@ -30,38 +30,37 @@ def main():
     vlm = create_vlm(VLM_MODEL_NAME, demo_bin=VLM_DEMO_BIN)
     vlm.load(VLM_MODEL_PATH)
 
-    cam = AstraProCamera(21)
+    cam = USBCamera(CAMERA_INDEX)
     cam.connect()
     print("Enter → VLM | q 退出")
     print("首次启动请按 Enter 开始推理")
 
     try:
         while True:
-            ret, frame = cam.rgb_cap.read()
-            if not ret:
-                continue
+                rgb = cam.read_rgb()
+                display = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
-            if result_text:
-                cv2.putText(frame, result_text, (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            if inferring:
-                cv2.putText(frame, "推理中...", (10, 60),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                if result_text:
+                    cv2.putText(display, result_text, (10, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                if inferring:
+                    cv2.putText(display, "推理中...", (10, 60),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-            if WINDOW_SCALE != 1.0:
-                h, w = frame.shape[:2]
-                frame = cv2.resize(frame, (int(w * WINDOW_SCALE), int(h * WINDOW_SCALE)))
-            cv2.imshow("RK3588-EIA", frame)
-            key = cv2.waitKey(1) & 0xFF
+                if WINDOW_SCALE != 1.0:
+                    h, w = display.shape[:2]
+                    display = cv2.resize(display, (int(w * WINDOW_SCALE), int(h * WINDOW_SCALE)))
+                cv2.imshow("RK3588-EIA", display)
+                key = cv2.waitKey(1) & 0xFF
 
-            if key == ord("q"):
-                break
-            if key in (13, 10) and not inferring:
-                inferring = True
-                result_text = "推理中..."
-                t = threading.Thread(target=do_inference, args=(vlm, frame))
-                t.daemon = True
-                t.start()
+                if key == ord("q"):
+                    break
+                if key in (13, 10) and not inferring:
+                    inferring = True
+                    result_text = "推理中..."
+                    t = threading.Thread(target=do_inference, args=(vlm, rgb))
+                    t.daemon = True
+                    t.start()
     except KeyboardInterrupt:
         pass
     finally:

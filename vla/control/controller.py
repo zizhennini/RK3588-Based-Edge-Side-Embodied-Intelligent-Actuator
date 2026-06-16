@@ -12,6 +12,16 @@ class ArmController:
         "wrist_flex", "wrist_roll", "gripper",
     ]
 
+    # 从 URDF 提取的关节限位（弧度）
+    JOINT_LIMITS = {
+        "shoulder_pan": (-1.91986, 1.91986),
+        "shoulder_lift": (-1.74533, 1.74533),
+        "elbow_flex": (-1.69, 1.69),
+        "wrist_flex": (-1.65806, 1.65806),
+        "wrist_roll": (-2.74385, 2.84121),
+        "gripper": (-0.174533, 1.74533),
+    }
+
     def __init__(
         self,
         port: str = "/dev/ttyUSB0",
@@ -45,7 +55,11 @@ class ArmController:
                     L3 * np.sin(theta3), L2 + L3 * np.cos(theta3)
                 )
                 theta4, theta5, theta6 = 0.0, -theta2 - theta3 + np.pi / 2, 0.0
-                q = np.deg2rad([theta1, theta2, theta3, theta4, theta5, theta6])
+                q = np.array([theta1, theta2, theta3, theta4, theta5, theta6])
+                limits = ArmController.JOINT_LIMITS
+                for i, name in enumerate(ArmController.JOINT_NAMES):
+                    low, high = limits[name]
+                    q[i] = np.clip(q[i], low, high)
                 if len(current_joint_pos) > 6:
                     result = np.zeros_like(current_joint_pos)
                     result[:6] = np.rad2deg(q)
@@ -58,13 +72,21 @@ class ArmController:
 
         return GeoIK()
 
+    def _clamp_joints(self, angles_rad: np.ndarray) -> np.ndarray:
+        for i, name in enumerate(self.JOINT_NAMES):
+            low, high = self.JOINT_LIMITS[name]
+            angles_rad[i] = np.clip(angles_rad[i], low, high)
+        return angles_rad
+
     def move_to(self, x: float, y: float, z: float):
         current = self._read_current_pos()
         t_des = np.eye(4)
         t_des[:3, 3] = [x, y, z]
         angles_deg = self.ik.inverse_kinematics(current, t_des)
+        angles_rad = np.deg2rad(angles_deg[:6])
+        angles_rad = self._clamp_joints(angles_rad)
         for sid in range(1, 7):
-            self._write_angle(sid, float(np.deg2rad(angles_deg[sid - 1])))
+            self._write_angle(sid, float(angles_rad[sid - 1]))
 
     def _read_current_pos(self) -> np.ndarray:
         return np.zeros(len(self.JOINT_NAMES))

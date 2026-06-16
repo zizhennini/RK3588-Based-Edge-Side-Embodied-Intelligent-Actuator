@@ -2,7 +2,9 @@
 import numpy as np
 
 
-# ── Astra Pro 相机内参（需实标后替换） ──
+# ── 相机配置 ──
+CAMERA_INDEX = 0  # USB 相机设备号
+# 相机内参（需实标后替换）
 CAMERA_MATRIX = np.array([
     [600.0, 0.0, 320.0],
     [0.0, 600.0, 240.0],

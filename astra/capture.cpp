@@ -3,39 +3,40 @@
 #include <libobsensor/hpp/Error.hpp>
 #include <fstream>
 #include <iostream>
+#include <signal.h>
 
-int main(int argc, char **argv) try {
+volatile sig_atomic_t running = 1;
+void handle_signal(int) { running = 0; }
+
+int main() try {
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
+
     ob::Pipeline pipe;
     auto config = std::make_shared<ob::Config>();
     config->enableVideoStream(OB_STREAM_DEPTH);
     pipe.start(config);
 
-    auto frameset = pipe.waitForFrames(5000);
-    if (!frameset) { std::cerr << "timeout" << std::endl; return 1; }
+    while (running) {
+        auto frameset = pipe.waitForFrames(1000);
+        if (!frameset) continue;
+        auto depthFrame = frameset->depthFrame();
+        if (!depthFrame) continue;
 
-    auto depthFrame = frameset->depthFrame();
-    if (!depthFrame) { std::cerr << "no depth frame" << std::endl; return 1; }
+        int w = depthFrame->width(), h = depthFrame->height();
+        float scale = depthFrame->getValueScale();
+        auto data = (uint16_t *)depthFrame->data();
 
-    int w = depthFrame->width(), h = depthFrame->height();
-    float scale = depthFrame->getValueScale();
-    auto data = (uint16_t *)depthFrame->data();
-
-    // 保存深度图: float32, 单位米
-    {
         std::ofstream f("_depth.f32", std::ios::binary);
         for (int i = 0; i < w * h; i++) {
             float z = data[i] * scale / 1000.0f;
             f.write((const char *)&z, sizeof(float));
         }
-    }
+        f.close();
 
-    // 保存宽高信息
-    {
-        std::ofstream f("_depth.info");
-        f << w << " " << h << std::endl;
+        std::ofstream info("_depth.info");
+        info << w << " " << h << std::endl;
     }
-
-    std::cout << "depth: " << w << "x" << h << std::endl;
 
     pipe.stop();
     return 0;
