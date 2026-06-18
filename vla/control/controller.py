@@ -22,6 +22,16 @@ class ArmController:
         "gripper": (-0.174533, 1.74533),
     }
 
+    # 标定数据（来自 LeRobot 校准）
+    CALIB = {
+        1: {"homing_offset": 2048, "range_min": 946, "range_max": 3287},
+        2: {"homing_offset": 2048, "range_min": 821, "range_max": 3206},
+        3: {"homing_offset": 2048, "range_min": 888, "range_max": 3105},
+        4: {"homing_offset": 2048, "range_min": 851, "range_max": 3192},
+        5: {"homing_offset": 2048, "range_min": 130, "range_max": 3985},
+        6: {"homing_offset": 1781, "range_min": 1495, "range_max": 2860},
+    }
+
     def __init__(
         self,
         port: str = "/dev/ttyUSB0",
@@ -40,7 +50,6 @@ class ArmController:
         except Exception as e:
             print(f"  IK: 官方不可用({e})，降级为几何 IK")
 
-        # 降级：几何 IK
         class GeoIK:
             def inverse_kinematics(self, current_joint_pos, desired_ee_pose):
                 x, y, z = desired_ee_pose[:3, 3]
@@ -92,14 +101,24 @@ class ArmController:
         return np.zeros(len(self.JOINT_NAMES))
 
     def _write_angle(self, sid: int, rad: float):
-        pulse = int(500 + rad / np.pi * 500)
-        pulse = max(0, min(1000, pulse))
-        cmd = struct.pack("<BBBBBBH", 0xFF, 0xFF, sid, 5, 0x03, 0x2A, pulse)
+        calib = self.CALIB[sid]
+        offset = calib["homing_offset"]
+        low_deg = np.rad2deg(self.JOINT_LIMITS[self.JOINT_NAMES[sid - 1]][0])
+        high_deg = np.rad2deg(self.JOINT_LIMITS[self.JOINT_NAMES[sid - 1]][1])
+        deg = np.rad2deg(rad)
+        if deg >= 0:
+            ratio = deg / high_deg if high_deg != 0 else 0
+            raw = int(offset + ratio * (calib["range_max"] - offset))
+        else:
+            ratio = deg / low_deg if low_deg != 0 else 0
+            raw = int(offset + ratio * (offset - calib["range_min"]))
+        raw = max(calib["range_min"], min(calib["range_max"], raw))
+        cmd = struct.pack("<BBBBBBH", 0xFF, 0xFF, sid, 5, 0x03, 0x2A, raw)
         checksum = (~sum(cmd[2:]) & 0xFF)
         self.ser.write(cmd + struct.pack("<B", checksum))
 
     def gripper(self, open: bool):
-        pulse = 400 if open else 200
+        pulse = 2600 if open else 1781
         cmd = struct.pack("<BBBBBBH", 0xFF, 0xFF, 6, 5, 0x03, 0x2A, pulse)
         cks = (~sum(cmd[2:]) & 0xFF)
         self.ser.write(cmd + struct.pack("<B", cks))

@@ -51,7 +51,7 @@ def main():
                     h, w = display.shape[:2]
                     display = cv2.resize(display, (int(w * WINDOW_SCALE), int(h * WINDOW_SCALE)))
                 cv2.imshow("RK3588-EIA", display)
-                key = cv2.waitKey(1) & 0xFF
+                key = cv2.waitKey(10) & 0xFF
 
                 if key == ord("q"):
                     break
