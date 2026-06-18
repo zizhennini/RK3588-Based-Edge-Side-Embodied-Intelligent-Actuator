@@ -94,6 +94,7 @@ class ArmController:
         angles_deg = self.ik.inverse_kinematics(current, t_des)
         angles_rad = np.deg2rad(angles_deg[:6])
         angles_rad = self._clamp_joints(angles_rad)
+        # 同时发送6个关节，避免逐个动作导致碰撞
         for sid in range(1, 7):
             self._write_angle(sid, float(angles_rad[sid - 1]))
 
@@ -102,16 +103,9 @@ class ArmController:
 
     def _write_angle(self, sid: int, rad: float):
         calib = self.CALIB[sid]
-        offset = calib["homing_offset"]
-        low_deg = np.rad2deg(self.JOINT_LIMITS[self.JOINT_NAMES[sid - 1]][0])
-        high_deg = np.rad2deg(self.JOINT_LIMITS[self.JOINT_NAMES[sid - 1]][1])
         deg = np.rad2deg(rad)
-        if deg >= 0:
-            ratio = deg / high_deg if high_deg != 0 else 0
-            raw = int(offset + ratio * (calib["range_max"] - offset))
-        else:
-            ratio = deg / low_deg if low_deg != 0 else 0
-            raw = int(offset + ratio * (offset - calib["range_min"]))
+        mid = (calib["range_min"] + calib["range_max"]) / 2
+        raw = int(deg * 4095 / 360 + mid)
         raw = max(calib["range_min"], min(calib["range_max"], raw))
         cmd = struct.pack("<BBBBBBH", 0xFF, 0xFF, sid, 5, 0x03, 0x2A, raw)
         checksum = (~sum(cmd[2:]) & 0xFF)
