@@ -13,6 +13,25 @@ COLOR_MAP = {
 }
 
 
+def _parse_color(raw: str) -> str:
+    """解析颜色，支持英文名和 #ff0000 格式"""
+    raw = raw.lower().strip().replace(" ", "")
+    # 十六进制 #ff0000 → red
+    hex_map = {
+        "#ff": "红色", "#00ff00": "绿色", "#0000ff": "蓝色",
+        "#ffff00": "黄色", "#ffffff": "白色", "#000000": "黑色",
+        "#ffa500": "橙色", "#800080": "紫色", "#808080": "灰色",
+    }
+    for hex_code, cn in hex_map.items():
+        if raw.startswith(hex_code):
+            return cn
+    # 英文名匹配
+    for en, cn in COLOR_MAP.items():
+        if en in raw:
+            return cn
+    return "红色"
+
+
 class SmolVLM2_500MEngine(VLMBase):
     def __init__(self):
         self.demo_bin = "demo"
@@ -69,14 +88,7 @@ class SmolVLM2_500MEngine(VLMBase):
         except (ValueError, json.JSONDecodeError):
             return VLMResult(color="红色", object="物体", cx=None, cy=None, raw=raw)
 
-        color = "红色"
-        raw_color = data.get("color", "")
-        if isinstance(raw_color, str):
-            raw_color = raw_color.lower().strip()
-            for en, cn in COLOR_MAP.items():
-                if en in raw_color:
-                    color = cn
-                    break
+        color = _parse_color(data.get("color", ""))
 
         object_name = str(data.get("objectName", data.get("object", "物体")))
 

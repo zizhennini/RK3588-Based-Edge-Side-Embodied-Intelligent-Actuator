@@ -50,9 +50,11 @@ class VLApipeline:
                     return f"locate_failed: {result.color} {result.object}"
                 u, v = pos["u"], pos["v"]
 
-            z = float(depth[v, u])
-            if z <= 0 or z > 5:
-                z = 0.35
+            z = 0.35
+            if 0 <= v < depth.shape[0] and 0 <= u < depth.shape[1]:
+                dz = float(depth[v, u])
+                if 0 < dz <= 5:
+                    z = dz
             x = (u - self.K[0, 2]) * z / self.K[0, 0]
             y = (v - self.K[1, 2]) * z / self.K[1, 1]
             self.target_3d = (x, y, z)

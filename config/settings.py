@@ -3,7 +3,7 @@ import numpy as np
 
 
 # ── 相机配置 ──
-CAMERA_INDEX = 0  # USB 相机设备号
+CAMERA_INDEX = 21  # USB 相机设备号
 # 相机内参（需实标后替换）
 CAMERA_MATRIX = np.array([
     [600.0, 0.0, 320.0],
@@ -12,14 +12,12 @@ CAMERA_MATRIX = np.array([
 ], dtype=np.float64)
 
 # ── 串口配置 ──
-SERIAL_PORT = "/dev/ttyUSB0"
+SERIAL_PORT = "/dev/ttyACM0"
 SERIAL_BAUD = 1000000
 
 # ── VLM 配置 ──
 VLM_MODEL_NAME = "qwen3-vl-2b"
-RKLLM_BIN = "/usr/bin/rkllm_demo"
 VLM_MODEL_PATH = "./models/Qwen3-VL-2B"
-# multimodal demo 可执行文件路径（Qwen3-VL / InternVL3 等需要）
 VLM_DEMO_BIN = "/usr/bin/demo"
 
 # ── MobileNet SSD 配置 ──

@@ -34,9 +34,9 @@ class ColorLocator:
         if M["m00"] == 0:
             return None
         u, v = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
-        z = float(depth[v, u])
+        z = float(depth[v, u]) if 0 <= v < depth.shape[0] and 0 <= u < depth.shape[1] else 0.35
         if z <= 0 or np.isnan(z):
-            return None
+            z = 0.35
         fx, fy = self.K[0, 0], self.K[1, 1]
         cx, cy = self.K[0, 2], self.K[1, 2]
         x = (u - cx) * z / fx

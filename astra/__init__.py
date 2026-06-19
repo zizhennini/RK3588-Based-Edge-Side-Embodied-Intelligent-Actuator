@@ -1,1 +1,1 @@
-from .camera import USBCamera
+from .camera import USBCamera, AstraProCamera

@@ -5,17 +5,15 @@ import sys
 sys.path.insert(0, ".")
 
 from config.settings import (
-    CAMERA_MATRIX, SERIAL_PORT, SERIAL_BAUD,
-    VLM_MODEL_NAME, RKLLM_BIN, VLM_MODEL_PATH,
-    SSD_PROTOTXT, SSD_CAFFEMODEL, SSD_CONFIDENCE,
+    CAMERA_MATRIX, CAMERA_INDEX, SERIAL_PORT, SERIAL_BAUD,
+    VLM_MODEL_NAME, VLM_MODEL_PATH, VLM_DEMO_BIN,
 )
 from astra import AstraProCamera
 from vla.vlm import create_vlm
-from vla.vision import ColorLocator, MobileNetSSD
+from vla.vision import ColorLocator
 from vla.control import ArmController
 from vla.pipe import VLApipeline
 from vla.pipe.pipeline import State
-
 
 def main():
     vlm = None
@@ -23,22 +21,19 @@ def main():
     arm = None
     try:
         print("[VLA] 加载 VLM ...")
-        vlm = create_vlm(VLM_MODEL_NAME, RKLLM_BIN)
+        vlm = create_vlm(VLM_MODEL_NAME, demo_bin=VLM_DEMO_BIN)
         vlm.load(VLM_MODEL_PATH)
 
         print("[VLA] 打开 Astra Pro ...")
-        cam = AstraProCamera()
+        cam = AstraProCamera(CAMERA_INDEX)
         cam.connect()
 
         locator = ColorLocator(CAMERA_MATRIX)
 
-        print("[VLA] 加载 MobileNet SSD ...")
-        detector = MobileNetSSD(SSD_PROTOTXT, SSD_CAFFEMODEL, SSD_CONFIDENCE)
-
         print("[VLA] 连接 SO-ARM101 ...")
         arm = ArmController(SERIAL_PORT, SERIAL_BAUD)
 
-        pipe = VLApipeline(arm, vlm, detector, locator)
+        pipe = VLApipeline(arm, vlm, CAMERA_MATRIX)
 
         print("\n=== VLA 端侧具身智能系统 ===")
         print("按 Enter 开始自主抓取，Ctrl+C 退出")

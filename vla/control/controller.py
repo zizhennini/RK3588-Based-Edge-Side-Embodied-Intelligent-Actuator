@@ -42,14 +42,6 @@ class ArmController:
         self.ik = self._init_ik(urdf_path)
 
     def _init_ik(self, urdf_path: str):
-        try:
-            from .kinematics import RobotKinematics
-            kin = RobotKinematics(urdf_path, target_frame_name="gripper_frame_link")
-            print(f"  IK: 官方 placo (URDF={urdf_path})")
-            return kin
-        except Exception as e:
-            print(f"  IK: 官方不可用({e})，降级为几何 IK")
-
         class GeoIK:
             def inverse_kinematics(self, current_joint_pos, desired_ee_pose):
                 x, y, z = desired_ee_pose[:3, 3]
@@ -59,7 +51,7 @@ class ArmController:
                 d = np.sqrt((r - 0.025) ** 2 + (z - L1) ** 2)
                 cos_t3 = (d ** 2 - L2 ** 2 - L3 ** 2) / (2 * L2 * L3)
                 cos_t3 = np.clip(cos_t3, -1.0, 1.0)
-                theta3 = np.arccos(cos_t3)
+                theta3 = -abs(np.arccos(cos_t3))
                 theta2 = np.arctan2(z - L1, r - 0.025) - np.arctan2(
                     L3 * np.sin(theta3), L2 + L3 * np.cos(theta3)
                 )
