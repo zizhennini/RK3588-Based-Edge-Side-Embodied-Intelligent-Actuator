@@ -31,9 +31,12 @@ class USBCamera:
 
     def _grab_loop(self):
         while self._running:
-            ret, bgr = self.cap.read()
-            if ret:
-                self._latest_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            try:
+                ret, bgr = self.cap.read()
+                if ret:
+                    self._latest_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            except Exception:
+                pass
 
     def read(self) -> tuple[np.ndarray, np.ndarray]:
         rgb = self.read_rgb()
