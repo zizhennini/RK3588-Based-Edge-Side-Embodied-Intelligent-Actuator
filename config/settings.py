@@ -3,7 +3,7 @@ import numpy as np
 
 
 # ── 相机配置 ──
-CAMERA_INDEX = 21  # USB 相机设备号
+CAMERA_INDEX = 22  # 相机设备号
 # 相机内参（需实标后替换）
 CAMERA_MATRIX = np.array([
     [600.0, 0.0, 320.0],
