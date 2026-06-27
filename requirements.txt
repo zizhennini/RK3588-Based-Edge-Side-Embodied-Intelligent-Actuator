@@ -1,4 +1,10 @@
-numpy>=1.24
+numpy>=1.24,<2.0
 opencv-python>=4.8
+opencv-python-headless>=4.8
 pyserial>=3.5
-pyorbbecsdk>=1.10.0
+sherpa-onnx>=1.10
+pexpect>=4.8
+pyyaml>=6.0
+pillow>=10.0
+# rknn-toolkit-lite2: RK3588 NPU推理库，需手动安装whl包
+# lerobot: 遥操作与IK，需 pip install -e .[feetech]
