@@ -3,7 +3,9 @@ import numpy as np
 
 
 # ── 相机配置 ──
-CAMERA_INDEX = 22  # 相机设备号
+CAMERA_INDEX = 21  # 默认相机设备号
+CAMERA_OVERHEAD = 21  # 俯拍上帝视角（XWF-1080p6）
+CAMERA_ARM = 23       # 机械臂局部（icspring）
 # 相机内参（需实标后替换）
 CAMERA_MATRIX = np.array([
     [600.0, 0.0, 320.0],
