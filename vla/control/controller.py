@@ -40,6 +40,22 @@ class ArmController:
     ):
         self.ser = serial.Serial(port, baud, timeout=0.1)
         self.ik = self._init_ik(urdf_path)
+        self._configure_motors()
+
+    def _configure_motors(self):
+        """设置舵机加速度和 PID，让运动更平滑"""
+        import time
+        for sid in range(1, 7):
+            # 加速度寄存器 0x29，值越大加速越快
+            cmd = struct.pack("<BBBBBBB", 0xFF, 0xFF, sid, 4, 0x03, 0x29, 100)
+            cks = (~sum(cmd[2:]) & 0xFF)
+            self.ser.write(cmd + struct.pack("<B", cks))
+            time.sleep(0.01)
+            # P 系数 (0x1A) — 降低减少抖动
+            cmd = struct.pack("<BBBBBBB", 0xFF, 0xFF, sid, 4, 0x03, 0x1A, 16)
+            cks = (~sum(cmd[2:]) & 0xFF)
+            self.ser.write(cmd + struct.pack("<B", cks))
+            time.sleep(0.01)
 
     def _init_ik(self, urdf_path: str):
         class GeoIK:
