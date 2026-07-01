@@ -63,7 +63,7 @@ else:
 if cx:
     wx, wy = cx * 300 / 448, (448 - cy) * 300 / 448
     print(f"\n{obj_name} @ ({wx:.0f},{wy:.0f})mm")
-    subprocess.run(["espeak-ng", "-v", "zh", f"{obj_name}在{wx:.0f}乘{wy:.0f}毫米"], timeout=20)
+    subprocess.run(["espeak-ng", "-v", "zh", f"{obj_name}在{wx:.0f}乘{wy:.0f}毫米位置"], timeout=20)
 else:
     print(f"\n{obj_name}（无坐标）")
 

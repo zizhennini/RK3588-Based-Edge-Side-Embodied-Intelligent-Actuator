@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""lerobot-record-lite — 遥操作录制关节角度"""
+import sys, os, json, time, datetime, struct, serial
+
+SERIAL_BAUD = 1000000
+calib = [(946,3287),(821,3206),(888,3105),(851,3192),(0,4095),(1495,2860)]
+
+
+def read_leader(ser) -> dict:
+    cmd = struct.pack("<BBBBBBB", 0xFF, 0xFF, 0xFE, 4, 0x92, 0x38, 2)
+    cks = (~sum(cmd[2:]) & 0xFF)
+    ser.write(cmd + struct.pack("<B", cks))
+    time.sleep(0.003)
+    resp = ser.read(60)
+    angles = {}
+    for sid in range(1, 7):
+        idx = resp.find(bytes([0xFF, 0xFF, sid]))
+        if idx >= 0 and idx + 7 < len(resp):
+            pos = int.from_bytes(resp[idx+5:idx+7], "little")
+            lo, hi = calib[sid - 1]
+            mid = (lo + hi) / 2
+            angles[f"J{sid}"] = round((pos - mid) * 360 / 4095, 1)
+    return angles
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="遥操作录制关节角度")
+    parser.add_argument("--robot.port", default="/dev/ttyACM0")
+    parser.add_argument("--teleop.port", default="/dev/ttyACM1")
+    parser.add_argument("--fps", type=int, default=30)
+    parser.add_argument("--episode_time_s", type=int, default=10)
+    parser.add_argument("--out", default=None)
+    args = parser.parse_args()
+
+    out_path = args.out or "record_{}.json".format(datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
+
+    ser = serial.Serial(args.teleop.port, SERIAL_BAUD, timeout=0.05)
+    print("按 Enter 开始录制 {} 秒（请先启动遥操作）...".format(args.episode_time_s))
+    input()
+
+    frames = []
+    t0 = time.perf_counter()
+    while time.perf_counter() - t0 < args.episode_time_s:
+        loop_t = time.perf_counter()
+        angles = read_leader(ser)
+        if angles:
+            angles["t"] = round(time.perf_counter() - t0, 3)
+            frames.append(angles)
+        time.sleep(max(1 / args.fps - (time.perf_counter() - loop_t), 0))
+
+    ser.close()
+
+    data = {"fps": args.fps, "total_frames": len(frames), "duration_s": args.episode_time_s, "frames": frames}
+    with open(out_path, "w") as f:
+        json.dump(data, f, indent=2)
+    print("{} 帧, 已保存 {}".format(len(frames), out_path))
+
+
+if __name__ == "__main__":
+    main()
