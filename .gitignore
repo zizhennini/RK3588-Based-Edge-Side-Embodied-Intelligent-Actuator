@@ -28,3 +28,14 @@ models/SmolVLM-500M/demo_Linux_aarch64/
 Qwen-Chat-Assistant/
 Qwen-Chat-Assistant.zip
 OrbbecSDK/
+
+# Python缓存
+__pycache__/
+*.pyc
+
+# 照片
+voice_assistant/voice_assistant/photos/
+voice_assistant/voice_assistant/demo.jpg
+
+# 演示二进制
+scripts/scripts/demo/
