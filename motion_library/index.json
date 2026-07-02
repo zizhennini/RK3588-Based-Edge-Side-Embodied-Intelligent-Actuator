@@ -1,0 +1,22 @@
+{
+  "greeting": {
+    "file": "",
+    "keywords": ["你好", "打招呼", "hi", "hello", "您好"],
+    "duration_s": 0
+  },
+  "grasp": {
+    "file": "",
+    "keywords": ["抓", "拿", "取", "抓取"],
+    "duration_s": 0
+  },
+  "bow": {
+    "file": "",
+    "keywords": ["鞠躬", "谢谢"],
+    "duration_s": 0
+  },
+  "wave": {
+    "file": "",
+    "keywords": ["挥手", "再见", "拜拜"],
+    "duration_s": 0
+  }
+}

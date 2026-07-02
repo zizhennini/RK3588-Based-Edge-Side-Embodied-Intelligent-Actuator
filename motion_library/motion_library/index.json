@@ -1,0 +1,40 @@
+{
+  "greeting": {
+    "file": "greeting_01.json",
+    "keywords": [
+      "你好",
+      "打招呼",
+      "hi",
+      "hello",
+      "您好"
+    ],
+    "duration_s": 10
+  },
+  "grasp": {
+    "file": "grasp_01.json",
+    "keywords": [
+      "抓",
+      "拿",
+      "取",
+      "抓取"
+    ],
+    "duration_s": 24
+  },
+  "bow": {
+    "file": "",
+    "keywords": [
+      "鞠躬",
+      "谢谢"
+    ],
+    "duration_s": 0
+  },
+  "wave": {
+    "file": "",
+    "keywords": [
+      "挥手",
+      "再见",
+      "拜拜"
+    ],
+    "duration_s": 0
+  }
+}

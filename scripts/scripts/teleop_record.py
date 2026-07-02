@@ -50,14 +50,23 @@ def main():
 
             dt = time.perf_counter() - loop_t
             time.sleep(max(1 / args.fps - dt, 0))
+    except KeyboardInterrupt:
+        print("\n录制中断")
     finally:
-        follower.disconnect()
-        leader.disconnect()
+        # 先保存数据，再断开连接
+        data = {"fps": args.fps, "total_frames": len(frames), "duration_s": args.episode_time_s, "frames": frames}
+        with open(out_path, "w") as f:
+            json.dump(data, f, indent=2)
+        print("{} 帧, 已保存 {}".format(len(frames), out_path))
 
-    data = {"fps": args.fps, "total_frames": len(frames), "duration_s": args.episode_time_s, "frames": frames}
-    with open(out_path, "w") as f:
-        json.dump(data, f, indent=2)
-    print("{} 帧, 已保存 {}".format(len(frames), out_path))
+        try:
+            follower.disconnect()
+        except Exception as e:
+            print("断开从臂时出错: {}".format(e))
+        try:
+            leader.disconnect()
+        except Exception as e:
+            print("断开主臂时出错: {}".format(e))
 
 if __name__ == "__main__":
     main()
