@@ -1,9 +1,10 @@
-"""相机模块 — USBCamera + AstraProCamera"""
+"""相机模块 — USBCamera + AstraProCamera + D435iCamera"""
 import cv2
 import numpy as np
 import subprocess
 import threading
 from pathlib import Path
+from collections import deque
 
 
 ASTRA_BIN = Path(__file__).parent / "build" / "astra_capture"
@@ -125,3 +126,79 @@ class AstraProCamera:
             self.cap.release()
         for f in ["_depth.f32", "_depth.info"]:
             (self._cwd / f).unlink(missing_ok=True)
+
+
+class D435iCamera:
+    """Intel RealSense D435i — RGB + 深度"""
+    def __init__(self, depth_res=(848, 480), rgb_res=(640, 480), fps=30):
+        self._pipeline = None
+        self._align = None
+        self._intr = None
+        self._depth_res = depth_res
+        self._rgb_res = rgb_res
+        self._fps = fps
+        self._depth_buf = deque(maxlen=5)
+        self._spa = None
+        self._tmp = None
+
+    def connect(self):
+        import pyrealsense2 as rs
+        self._pipeline = rs.pipeline()
+        cfg = rs.config()
+        dw, dh = self._depth_res
+        rw, rh = self._rgb_res
+        cfg.enable_stream(rs.stream.depth, dw, dh, rs.format.z16, self._fps)
+        cfg.enable_stream(rs.stream.color, rw, rh, rs.format.bgr8, self._fps)
+        profile = self._pipeline.start(cfg)
+        sensor = profile.get_device().first_depth_sensor()
+        sensor.set_option(rs.option.visual_preset, 3)
+        sensor.set_option(rs.option.laser_power, 150)
+        sensor.set_option(rs.option.enable_auto_exposure, 1)
+        self._intr = profile.get_stream(rs.stream.depth).as_video_stream_profile().get_intrinsics()
+        self._align = rs.align(rs.stream.color)
+        self._spa = rs.spatial_filter()
+        self._tmp = rs.temporal_filter()
+        import time
+        for _ in range(20):
+            self._pipeline.wait_for_frames()
+            time.sleep(0.05)
+
+    def read(self):
+        import pyrealsense2 as rs
+        frames = self._pipeline.wait_for_frames()
+        aligned = self._align.process(frames)
+        color = aligned.get_color_frame()
+        depth_raw = aligned.get_depth_frame()
+        if not color or not depth_raw:
+            h, w = self._rgb_res
+            return np.zeros((h, w, 3), dtype=np.uint8), np.zeros(self._depth_res[::-1], dtype=np.float32)
+        f = self._spa.process(depth_raw)
+        f = self._tmp.process(f)
+        d = np.asanyarray(f.get_data()).astype(np.float32) / 1000.0
+        d[d > 2.0] = 0
+        self._depth_buf.append(d)
+        if len(self._depth_buf) == 5:
+            d = np.median(np.array(self._depth_buf), axis=0)
+        rgb = cv2.cvtColor(np.asanyarray(color.get_data()), cv2.COLOR_BGR2RGB)
+        return rgb, d
+
+    def read_rgb(self):
+        return self.read()[0]
+
+    def get_depth_at(self, u, v):
+        import pyrealsense2 as rs
+        frames = self._pipeline.wait_for_frames()
+        d = frames.get_depth_frame()
+        if d:
+            z = d.get_distance(u, v)
+            return z if z > 0 else 0.35
+        return 0.35
+
+    def deproject(self, u, v, z):
+        import pyrealsense2 as rs
+        return rs.rs2_deproject_pixel_to_point(self._intr, [u, v], z)
+
+    def disconnect(self):
+        if self._pipeline:
+            self._pipeline.stop()
+            self._pipeline = None

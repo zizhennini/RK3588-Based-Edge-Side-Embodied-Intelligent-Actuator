@@ -6,12 +6,15 @@ import numpy as np
 CAMERA_INDEX = 21  # 默认相机设备号
 CAMERA_OVERHEAD = 21  # 俯拍上帝视角（XWF-1080p6）
 CAMERA_ARM = 23       # 机械臂局部（icspring）
+CAMERA_D435I = True   # 使用 D435i 深度相机
 # 相机内参（需实标后替换）
 CAMERA_MATRIX = np.array([
     [600.0, 0.0, 320.0],
     [0.0, 600.0, 240.0],
     [0.0, 0.0, 1.0],
 ], dtype=np.float64)
+# D435i 深度相机内参（自动获取）
+D435_INTRINSICS = None  # 运行时自动填充
 
 # ── 串口配置 ──
 SERIAL_PORT = "/dev/ttyACM0"
