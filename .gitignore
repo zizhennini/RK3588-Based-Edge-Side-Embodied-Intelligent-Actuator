@@ -32,6 +32,7 @@ OrbbecSDK/
 # Python缓存
 __pycache__/
 *.pyc
+*.egg-info/
 
 # 照片
 voice_assistant/voice_assistant/photos/
