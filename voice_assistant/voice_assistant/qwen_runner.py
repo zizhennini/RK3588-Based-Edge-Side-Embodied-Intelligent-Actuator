@@ -85,7 +85,8 @@ class QwenRunner:
     def _spawn(self, image_path: str | Path) -> pexpect.spawn:
         env = os.environ.copy()
         current_ld = env.get("LD_LIBRARY_PATH", "")
-        env["LD_LIBRARY_PATH"] = f"{self.project_dir}:{current_ld}" if current_ld else str(self.project_dir)
+        lib_dir = os.path.join(os.path.dirname(self.qwen["demo"]), "lib")
+        env["LD_LIBRARY_PATH"] = f"{lib_dir}:{current_ld}" if current_ld else lib_dir
         env.setdefault("RKLLM_LOG_LEVEL", "1")
 
         args = [
@@ -96,6 +97,7 @@ class QwenRunner:
             str(self.qwen["max_new_tokens"]),
             str(self.qwen["max_context_len"]),
             str(self.qwen["rknn_core_num"]),
+            str(self.qwen.get("platform", "rk3588")),
             str(self.qwen["img_start"]),
             str(self.qwen["img_end"]),
             str(self.qwen["img_content"]),

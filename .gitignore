@@ -39,3 +39,5 @@ voice_assistant/voice_assistant/demo.jpg
 
 # 演示二进制
 scripts/scripts/demo/
+models/Qwen3.5-0.8B/
+models/models/Qwen3.5-0.8B/

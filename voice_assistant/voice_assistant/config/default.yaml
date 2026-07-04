@@ -56,12 +56,13 @@ models:
     suppress_stderr_warnings: true
 
 qwen:
-  demo: /home/elf/work/RK3588-EIA/voice_assistant/demo
-  vision_model: /home/elf/work/RK3588-EIA/voice_assistant/models/qwen3-vl-2b_vision_rk3588.rknn
-  llm_model: /home/elf/work/RK3588-EIA/voice_assistant/models/qwen3-vl-2b-instruct_w8a8_rk3588.rkllm
+  demo: /home/elf/work/RK3588-EIA/models/Qwen3.5-0.8B/demo
+  vision_model: /home/elf/work/RK3588-EIA/models/Qwen3.5-0.8B/Qwen3.5-0.8B_vision_rk3588.rknn
+  llm_model: /home/elf/work/RK3588-EIA/models/Qwen3.5-0.8B/Qwen3.5-0.8B_w8a8_rk3588.rkllm
   max_new_tokens: 2048
   max_context_len: 4096
   rknn_core_num: 3
+  platform: rk3588
   img_start: <|vision_start|>
   img_end: <|vision_end|>
   img_content: <|image_pad|>

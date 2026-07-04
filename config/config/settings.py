@@ -18,9 +18,9 @@ SERIAL_PORT = "/dev/ttyACM0"
 SERIAL_BAUD = 1000000
 
 # ── VLM 配置 ──
-VLM_MODEL_NAME = "qwen3-vl-2b"
-VLM_MODEL_PATH = "./models/Qwen3-VL-2B"
-VLM_DEMO_BIN = "/usr/bin/demo"
+VLM_MODEL_NAME = "qwen3.5"
+VLM_MODEL_PATH = "./models/Qwen3.5-0.8B"
+VLM_DEMO_BIN = "./models/Qwen3.5-0.8B/demo"
 
 # ── MobileNet SSD 配置 ──
 SSD_PROTOTXT = "./models/MobileNetSSD/MobileNetSSD_deploy.prototxt"
