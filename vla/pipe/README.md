@@ -12,15 +12,17 @@
 
 ```
 IDLE ──start()──▶ VLM_INFER ──▶ LOCATE ──▶ GRASP ──▶ PLACE ──▶ DONE
-                                              │
-                                              └── locate_failed ──▶ DONE
+                                               │
+                                               └── locate_failed ──▶ DONE
 ```
 
 ## 使用
 
 ```python
 from vla.pipe import VLApipeline
+from config.cpu_affinity import bind_current_thread, BIG_CORES
 
+bind_current_thread(BIG_CORES)  # 绑大核
 pipe = VLApipeline(arm, vlm, locator)
 pipe.start()
 status = pipe.step(rgb, depth)  # 每次调用推进一帧

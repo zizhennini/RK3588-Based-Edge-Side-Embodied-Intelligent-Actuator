@@ -1,4 +1,4 @@
-"""指令队列 — 串行有序执行 + 中断机制"""
+"""指令队列 — 串行有序执行 + 中断机制 + 分级内存管控"""
 import json
 import time
 import threading
@@ -6,6 +6,8 @@ import numpy as np
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from config.memory import MemoryMonitor
 
 
 @dataclass
@@ -62,7 +64,7 @@ class CommandQueue:
         self.smart_vlm = smart_vlm
         self.camera = camera
         self.snapshot_cb = snapshot_cb
-        self.memory_monitor = memory_monitor
+        self.memory_monitor = memory_monitor or MemoryMonitor()
         self.motion_matcher = MotionMatcher(Path(motion_dir) / "index.json")
         self.motion_dir = Path(motion_dir)
 
@@ -150,34 +152,18 @@ class CommandQueue:
 
     # ── TTS 播报 ──
 
-    _tts = None
+    _tts_player = None
 
     def _speak(self, text: str):
         if not text or not text.strip():
             return
-        import numpy as _np
-        t = text.strip().replace("\n", "。").replace("**", "")
-        for sep in "。！？!?":
-            if sep in t:
-                t = t.split(sep)[0] + sep
-                break
-        t = t[:80]
-        print(f"[TTS] {t}")
+        cleaned = text.strip().replace("**", "").replace("\n", "，")
         try:
-            if self.__class__._tts is None:
-                from voice_assistant.voice_assistant.tts import SherpaTts
+            if self.__class__._tts_player is None:
+                from voice_assistant.voice_assistant.streaming_tts import StreamingTtsPlayer
                 from voice_assistant.voice_assistant.config import load_config
-                cfg = load_config()
-                self.__class__._tts = SherpaTts(cfg)
-            sr, samples = self.__class__._tts.synthesize_samples(t)
-            arr = _np.array(samples, dtype=_np.float32)
-            arr = _np.clip(arr, -1.0, 1.0)
-            pcm = (arr * 32767).astype(_np.int16).tobytes()
-            import subprocess as _sp
-            _sp.run(["aplay", "-q", "-D", "plughw:rockchipnau8822,0",
-                     "-t", "raw", "-f", "S16_LE",
-                     "-r", str(sr), "-c", "1"],
-                    input=pcm, timeout=30)
+                self.__class__._tts_player = StreamingTtsPlayer(load_config())
+            self.__class__._tts_player.enqueue(cleaned)
         except Exception as e:
             print(f"[TTS] 播报失败: {e}")
 
@@ -214,38 +200,66 @@ class CommandQueue:
             if self._on_task_done:
                 self._on_task_done(task)
 
+    def _mem_acquire(self, comp: str) -> bool:
+        if self.memory_monitor and hasattr(self.memory_monitor, "acquire"):
+            ok = self.memory_monitor.acquire(comp)
+            if not ok:
+                print(f"[Memory] {comp} 内存预算不足")
+            return ok
+        return True
+
+    def _mem_release(self, comp: str):
+        if self.memory_monitor and hasattr(self.memory_monitor, "release"):
+            self.memory_monitor.release(comp)
+
     def _execute_task(self, task: Task):
         if task.type == "emergency_stop":
             self.interrupt()
             return
 
         if task.type == "tts":
-            text = task.data.get("text", "")
-            self._speak(text)
+            self._mem_acquire("tts")
+            try:
+                text = task.data.get("text", "")
+                self._speak(text)
+            finally:
+                self._mem_release("tts")
             return
 
         if task.type == "motion":
-            file_path = task.data.get("file", "")
-            action = task.data.get("action", "unknown")
-            if not file_path or not Path(file_path).exists():
-                print(f"[Motion] 轨迹文件不存在: {file_path}")
-                return
-            print(f"[Motion] 回放: {action}")
-            if self.arm:
-                self._replay_trajectory(file_path)
+            self._mem_acquire("recording")
+            try:
+                file_path = task.data.get("file", "")
+                action = task.data.get("action", "unknown")
+                if not file_path or not Path(file_path).exists():
+                    print(f"[Motion] 轨迹文件不存在: {file_path}")
+                    return
+                print(f"[Motion] 回放: {action}")
+                if self.arm:
+                    self._replay_trajectory(file_path)
+            finally:
+                self._mem_release("recording")
             return
 
         if task.type == "vlm_ask":
-            text = task.data.get("text", "")
-            print(f"[VLM] 问答: {text}")
-            if self.smart_vlm:
-                self._vlm_ask(text)
+            self._mem_acquire("vlm")
+            try:
+                text = task.data.get("text", "")
+                print(f"[VLM] 问答: {text}")
+                if self.smart_vlm:
+                    self._vlm_ask(text)
+            finally:
+                self._mem_release("vlm")
             return
 
         if task.type == "vlm_grasp":
-            print(f"[VLM] 抓取: {task.data}")
-            if self.smart_vlm and self.arm:
-                self._vlm_grasp(task.data)
+            self._mem_acquire("vlm")
+            try:
+                print(f"[VLM] 抓取: {task.data}")
+                if self.smart_vlm and self.arm:
+                    self._vlm_grasp(task.data)
+            finally:
+                self._mem_release("vlm")
             return
 
     # ── 具体执行器 ──

@@ -1,8 +1,8 @@
 paths:
-  project_dir: /home/elf/work/RK3588-EIA/voice_assistant
+  project_dir: /home/elf/work/RK3588-EIA
   temp_dir: /tmp/qwen_voice_assistant
-  photo_dir: /home/elf/work/RK3588-EIA/voice_assistant/photos
-  placeholder_image: /home/elf/work/RK3588-EIA/voice_assistant/demo.jpg
+  photo_dir: /home/elf/work/RK3588-EIA/voice_assistant/voice_assistant/photos
+  placeholder_image: /home/elf/work/RK3588-EIA/models/Qwen3.5-0.8B/demo.jpg
   capture_script: /home/elf/work/RK3588-EIA/voice_assistant/scripts/capture-photo.sh
 
 audio:
@@ -20,22 +20,23 @@ audio:
   asr_input_gain: 5.0
   command_seconds: 6
   wake_chunk_seconds: 2
+  camera_index: 21
 
 models:
   asr:
-    tokens: /home/elf/work/RK3588-EIA/voice_assistant/models/sherpa-onnx-conformer-zh-stateless2-2023-05-23/tokens.txt
-    encoder: /home/elf/work/RK3588-EIA/voice_assistant/models/sherpa-onnx-conformer-zh-stateless2-2023-05-23/encoder-epoch-99-avg-1.int8.onnx
-    decoder: /home/elf/work/RK3588-EIA/voice_assistant/models/sherpa-onnx-conformer-zh-stateless2-2023-05-23/decoder-epoch-99-avg-1.onnx
-    joiner: /home/elf/work/RK3588-EIA/voice_assistant/models/sherpa-onnx-conformer-zh-stateless2-2023-05-23/joiner-epoch-99-avg-1.int8.onnx
+    tokens: /home/elf/work/RK3588-EIA/voice_assistant/voice_assistant/models/sherpa-onnx-conformer-zh-stateless2-2023-05-23/tokens.txt
+    encoder: /home/elf/work/RK3588-EIA/voice_assistant/voice_assistant/models/sherpa-onnx-conformer-zh-stateless2-2023-05-23/encoder-epoch-99-avg-1.int8.onnx
+    decoder: /home/elf/work/RK3588-EIA/voice_assistant/voice_assistant/models/sherpa-onnx-conformer-zh-stateless2-2023-05-23/decoder-epoch-99-avg-1.onnx
+    joiner: /home/elf/work/RK3588-EIA/voice_assistant/voice_assistant/models/sherpa-onnx-conformer-zh-stateless2-2023-05-23/joiner-epoch-99-avg-1.int8.onnx
     num_threads: 2
     suppress_stderr_warnings: true
   tts:
     type: matcha
-    acoustic_model: /home/elf/work/RK3588-EIA/voice_assistant/models/matcha-icefall-zh-baker/model-steps-3.onnx
-    vocoder: /home/elf/work/RK3588-EIA/voice_assistant/models/vocos-22khz-univ.onnx
-    lexicon: /home/elf/work/RK3588-EIA/voice_assistant/models/matcha-icefall-zh-baker/lexicon.txt
-    tokens: /home/elf/work/RK3588-EIA/voice_assistant/models/matcha-icefall-zh-baker/tokens.txt
-    data_dir: /home/elf/work/RK3588-EIA/voice_assistant/models/matcha-icefall-zh-baker
+    acoustic_model: /home/elf/work/RK3588-EIA/voice_assistant/voice_assistant/models/matcha-icefall-zh-baker/model-steps-3.onnx
+    vocoder: /home/elf/work/RK3588-EIA/voice_assistant/voice_assistant/models/vocos-22khz-univ.onnx
+    lexicon: /home/elf/work/RK3588-EIA/voice_assistant/voice_assistant/models/matcha-icefall-zh-baker/lexicon.txt
+    tokens: /home/elf/work/RK3588-EIA/voice_assistant/voice_assistant/models/matcha-icefall-zh-baker/tokens.txt
+    data_dir: /home/elf/work/RK3588-EIA/voice_assistant/voice_assistant/models/matcha-icefall-zh-baker
     num_threads: 2
     sid: 0
     speed: 1.0
@@ -45,10 +46,10 @@ models:
     stream_max_speak_chars: 220
     suppress_stderr_warnings: true
   kws:
-    tokens: /home/elf/work/RK3588-EIA/voice_assistant/models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/tokens.txt
-    encoder: /home/elf/work/RK3588-EIA/voice_assistant/models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx
-    decoder: /home/elf/work/RK3588-EIA/voice_assistant/models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/decoder-epoch-13-avg-2-chunk-16-left-64.onnx
-    joiner: /home/elf/work/RK3588-EIA/voice_assistant/models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx
+    tokens: /home/elf/work/RK3588-EIA/voice_assistant/voice_assistant/models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/tokens.txt
+    encoder: /home/elf/work/RK3588-EIA/voice_assistant/voice_assistant/models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx
+    decoder: /home/elf/work/RK3588-EIA/voice_assistant/voice_assistant/models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/decoder-epoch-13-avg-2-chunk-16-left-64.onnx
+    joiner: /home/elf/work/RK3588-EIA/voice_assistant/voice_assistant/models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx
     keywords_file: /home/elf/work/RK3588-EIA/voice_assistant/config/wake_keywords.txt
     num_threads: 2
     keywords_score: 4.0
@@ -56,10 +57,10 @@ models:
     suppress_stderr_warnings: true
 
 qwen:
-  demo: /home/elf/work/RK3588-EIA/voice_assistant/demo
+  demo: /home/elf/work/RK3588-EIA/models/Qwen3.5-0.8B/demo
   vision_model: models/Qwen3.5-0.8B/Qwen3.5-0.8B_vision_rk3588.rknn
   llm_model: models/Qwen3.5-0.8B/Qwen3.5-0.8B_w8a8_rk3588.rkllm
-  max_new_tokens: 2048
+  max_new_tokens: 256
   max_context_len: 4096
   rknn_core_num: 3
   img_start: <|vision_start|>

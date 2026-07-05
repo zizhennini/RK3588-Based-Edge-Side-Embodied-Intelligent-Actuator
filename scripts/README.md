@@ -1,23 +1,22 @@
 # scripts — 工具脚本
 
-## 启动脚本
+## 语音交互
 
-| 脚本 | 用途 |
+| 脚本 | 说明 |
 |------|------|
-| `teleop.sh` | 主从遥操作示教 |
-| `record.sh` | 示教数据录制 |
-| `run_vla.sh` | VLA 自主抓取 |
+| `voice_motion.py` | 唤醒 → 录音 → ASR → CommandQueue → 动作/VLM（绑大核） |
+| `voice_vla.py` | 语音/文字 VLA 交互（带 SmartVLM + IdleUnloader，绑大核） |
+| `test_vla_voice.py` | VLA 全链路测试 |
 
-## 标定脚本
+## 机械臂
 
-| 脚本 | 用途 |
+| 脚本 | 说明 |
 |------|------|
-| `calibrate_camera.py` | 棋盘格相机内参标定 |
-| `calibrate_handeye.py` | Tsai-Lenz 手眼标定 |
+| `gestures.py` | 动作演示 |
+| `develop_motion.py` | 示教录制 → 平滑 → 入库 |
 
-## 系统工具
+## 相机
 
-| 脚本 | 用途 |
+| 脚本 | 说明 |
 |------|------|
-| `monitor.py` | RK3588 NPU/CPU/内存实时监控 |
-| `rkeia.service` | systemd 开机自启服务 |
+| `camera_viewer.py` | 相机取景 |

@@ -11,6 +11,7 @@ from .intent import IntentRouter
 from .qwen_runner import QwenRunner
 from .streaming_tts import StreamingTtsPlayer
 from .wake import SherpaKeywordWake, SttKeywordWake
+from config.memory import MemoryMonitor, MemoryLimiter
 
 
 class VoiceAssistant:
@@ -19,15 +20,18 @@ class VoiceAssistant:
         self.temp_dir = Path(config["paths"]["temp_dir"])
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.intent = IntentRouter.from_config(config)
-
-    def transcribe_wav(self, wav_path: str | Path) -> str:
-        return SherpaAsr(self.config).transcribe_wav(wav_path)
+        self.memory = MemoryMonitor()
 
     def record_command(self, seconds: int | None = None) -> Path:
-        seconds = seconds or int(self.config["audio"]["command_seconds"])
-        out = self.temp_dir / "command.wav"
-        out.unlink(missing_ok=True)
-        return AudioRecorder(self.config).record_wav(out, seconds)
+        with MemoryLimiter(self.memory, "recording"):
+            seconds = seconds or int(self.config["audio"]["command_seconds"])
+            out = self.temp_dir / "command.wav"
+            out.unlink(missing_ok=True)
+            return AudioRecorder(self.config).record_wav(out, seconds)
+
+    def transcribe_wav(self, wav_path: str | Path) -> str:
+        with MemoryLimiter(self.memory, "asr"):
+            return SherpaAsr(self.config).transcribe_wav(wav_path)
 
     def wait_for_wake(self, mode: str = "kws", timeout: int | None = None) -> str:
         if mode == "stt":

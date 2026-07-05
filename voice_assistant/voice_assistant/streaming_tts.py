@@ -32,17 +32,33 @@ class StreamingTtsPlayer:
             raise RuntimeError("streaming TTS worker failed") from self._error
 
     def _run(self) -> None:
+        import numpy as np
+        import threading as _t
+
         speaker = PcmSpeakerStream(self.config)
+        _silence = np.zeros(8000, dtype=np.float32)
+        _lock = _t.Lock()
+        _need_feed = True
+
+        def _feed_silence():
+            while _need_feed:
+                with _lock:
+                    speaker.write_samples(16000, _silence)
+        _t.Thread(target=_feed_silence, daemon=True).start()
+
         tts: SherpaTts | None = None
         try:
             while True:
                 text = self._queue.get()
                 if text is None:
                     break
+                _need_feed = False
                 if tts is None:
                     tts = SherpaTts(self.config)
                 sample_rate, samples = tts.synthesize_samples(text)
-                speaker.write_samples(sample_rate, samples)
+                with _lock:
+                    speaker.write_samples(sample_rate, samples)
+                _need_feed = True
         except BaseException as exc:
             self._error = exc
         finally:

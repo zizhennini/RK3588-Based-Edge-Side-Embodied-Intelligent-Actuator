@@ -1,42 +1,38 @@
 # vla/vlm — 通用 VLM 框架
 
-工厂模式，支持多模型一键切换。
+工厂模式，支持多模型一键切换。含按需加载/闲置卸载机制。
 
 ## 文件
 
 | 文件 | 说明 |
 |------|------|
 | `base.py` | `VLMBase` 抽象基类 + `VLMResult` 数据类 |
-| `internvl2.py` | InternVL2-1B (rkllm_demo) |
-| `qwen_vl.py` | Qwen2.5-VL-3B (rkllm_demo) |
-| `qwen3_vl.py` | Qwen3-VL-2B (多模态 demo，需要 .rknn+.rkllm) |
+| `qwen3_vl.py` | Qwen3.5-0.8B 引擎（子进程 demo） |
+| `smart_vlm.py` | 按需加载 + 闲置自动卸载封装 |
 | `factory.py` | 工厂函数 `create_vlm()` |
 
 ## 使用
 
 ```python
 from vla.vlm import create_vlm
+from vla.vlm.smart_vlm import SmartVLM, IdleUnloader
 
-# Qwen3-VL-2B（推荐）
-vlm = create_vlm("qwen3-vl-2b", demo_bin="/usr/bin/demo")
-vlm.load("./models/Qwen3-VL-2B")
-result = vlm.infer("/tmp/frame.jpg")
-print(result.color, result.object)
+# 带闲置卸载的 SmartVLM
+vlm = SmartVLM("qwen3-vl-2b", model_path, demo_bin=demo_bin, idle_timeout=30)
+vlm.ensure_loaded()          # 加载模型
+result = vlm.infer(path)     # 推理（自动 ensure_loaded）
+vlm.unload()                 # 卸载（释放 ~900MB）
 
-# InternVL2-1B
-vlm = create_vlm("internvl2-1b", rkllm_bin="rkllm_demo")
-vlm.load("./models/InternVL2-1B-rkllm/model.rkllm")
+# 后台自动卸载
+unloader = IdleUnloader(vlm, interval=5.0)
+unloader.start()
 ```
 
 ## 支持模型
 
 | 模型 | 配置名 | 引擎 | 模型文件 |
 |------|--------|------|---------|
-| Qwen3-VL-2B | `qwen3-vl-2b` | `Qwen3VLEngine` | .rknn + .rkllm（目录） |
-| InternVL2-1B | `internvl2-1b` | `InternVL2Engine` | .rkllm（文件路径） |
-| Qwen2.5-VL-3B | `qwen2.5-vl-3b` | `QwenVLEngine` | .rkllm（文件路径） |
-
-## 添加新模型
-
-1. 继承 `VLMBase`，实现 `load()` `infer()` `unload()`
-2. 在 `factory.py` 的 `VLM_REGISTRY` 中注册
+| Qwen3.5-0.8B | `qwen3.5-0.8b` | `Qwen3VLEngine` | .rknn + .rkllm |
+| Qwen3-VL-2B | `qwen3-vl-2b` | `Qwen3VLEngine` | .rknn + .rkllm |
+| SmolVLM-256M | — | 实验性 | ONNX |
+| SmolVLM-500M | — | 实验性 | ONNX |

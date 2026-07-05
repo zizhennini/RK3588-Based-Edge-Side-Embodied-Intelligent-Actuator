@@ -14,7 +14,6 @@ _REPLACEMENTS = {
 
 _PUNCT_TRANSLATION = str.maketrans(
     {
-        ":": "，",
         "：": "，",
         ";": "，",
         "；": "，",
@@ -68,6 +67,7 @@ def sanitize_tts_text(text: str, max_chars: int = 260, fallback: str | None = "�
             continue
         line = re.sub(r"^\s*[-*+]\s*", "", line)
         line = re.sub(r"^\s*\d+[.)、]\s*", "", line)
+        line = re.sub(r"\*\*", "", line)
         line = re.sub(r"<[^>]+>", "", line)
         line = re.sub(r"https?://\S+", "", line)
         for src, dst in _REPLACEMENTS.items():

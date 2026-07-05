@@ -15,7 +15,7 @@ class Qwen3VLEngine(VLMBase):
         cmd = [f"{MD}/demo", os.path.abspath(image_path),
                f"{MD}/Qwen3.5-0.8B_vision_rk3588.rknn",
                f"{MD}/Qwen3.5-0.8B_w8a8_rk3588.rkllm",
-               "128", "2048", "3", "rk3588",
+               "512", "2048", "3", "rk3588",
                "<|vision_start|>", "<|vision_end|>", "<|image_pad|>"]
         try:
             r = subprocess.run(cmd, input=text, capture_output=True, text=True,

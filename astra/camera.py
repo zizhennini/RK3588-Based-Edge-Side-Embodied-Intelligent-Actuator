@@ -145,29 +145,42 @@ class D435iCamera:
 
     def connect(self):
         import pyrealsense2 as rs
-        self._pipeline = rs.pipeline()
-        cfg = rs.config()
-        dw, dh = self._depth_res
-        rw, rh = self._rgb_res
-        cfg.enable_stream(rs.stream.depth, dw, dh, rs.format.z16, self._fps)
-        cfg.enable_stream(rs.stream.color, rw, rh, rs.format.bgr8, self._fps)
-        profile = self._pipeline.start(cfg)
-        sensor = profile.get_device().first_depth_sensor()
-        sensor.set_option(rs.option.visual_preset, 3)
-        sensor.set_option(rs.option.laser_power, 150)
-        sensor.set_option(rs.option.enable_auto_exposure, 1)
-        self._intr = profile.get_stream(rs.stream.depth).as_video_stream_profile().get_intrinsics()
-        self._align = rs.align(rs.stream.color)
-        self._spa = rs.spatial_filter()
-        self._tmp = rs.temporal_filter()
         import time
-        for _ in range(20):
-            self._pipeline.wait_for_frames()
-            time.sleep(0.05)
+        for attempt in range(3):
+            pipe = rs.pipeline()
+            cfg = rs.config()
+            dw, dh = self._depth_res
+            rw, rh = self._rgb_res
+            cfg.enable_stream(rs.stream.depth, dw, dh, rs.format.z16, self._fps)
+            cfg.enable_stream(rs.stream.color, rw, rh, rs.format.bgr8, self._fps)
+            try:
+                profile = pipe.start(cfg)
+                pipe.wait_for_frames(3000)
+                self._pipeline = pipe
+                self._intr = profile.get_stream(rs.stream.depth).as_video_stream_profile().get_intrinsics()
+                self._align = rs.align(rs.stream.color)
+                self._spa = rs.spatial_filter()
+                self._tmp = rs.temporal_filter()
+                return
+            except Exception as e:
+                pipe.stop()
+                if attempt < 2:
+                    time.sleep(2)
+                    continue
+                raise
 
     def read(self):
         import pyrealsense2 as rs
-        frames = self._pipeline.wait_for_frames()
+        frames = None
+        for _ in range(3):
+            try:
+                frames = self._pipeline.wait_for_frames(5000)
+                break
+            except RuntimeError:
+                continue
+        if frames is None:
+            h, w = self._rgb_res
+            return np.zeros((h, w, 3), dtype=np.uint8), np.zeros(self._depth_res[::-1], dtype=np.float32)
         aligned = self._align.process(frames)
         color = aligned.get_color_frame()
         depth_raw = aligned.get_depth_frame()
