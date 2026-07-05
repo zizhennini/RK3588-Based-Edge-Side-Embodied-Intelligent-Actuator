@@ -44,6 +44,7 @@ class SherpaKeywordWake:
         )
 
     def wait(self, timeout: int | None = None) -> str:
+        subprocess.run(["fuser", "-k", "/dev/snd/pcmC1D0c"], capture_output=True)
         stream = self.spotter.create_stream()
         cmd = [
             "arecord",

@@ -5,6 +5,7 @@ import subprocess
 import threading
 from pathlib import Path
 from collections import deque
+from config.cpu_affinity import bind_current_thread, LITTLE_CORES
 
 
 ASTRA_BIN = Path(__file__).parent / "build" / "astra_capture"
@@ -36,6 +37,7 @@ class USBCamera:
             time.sleep(0.01)
 
     def _grab_loop(self):
+        bind_current_thread(LITTLE_CORES)
         while self._running:
             try:
                 ret, bgr = self.cap.read()

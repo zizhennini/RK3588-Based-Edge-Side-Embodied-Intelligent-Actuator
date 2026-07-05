@@ -2,6 +2,7 @@
 import struct
 import serial
 import numpy as np
+from config.cpu_affinity import bind_current_thread, LITTLE_CORES
 
 
 class ArmController:
@@ -37,7 +38,9 @@ class ArmController:
         port: str = "/dev/ttyUSB0",
         baud: int = 1000000,
         urdf_path: str = "./models/so101_urdf/so101_new_calib.urdf",
+        bind_little: bool = True,
     ):
+        bind_current_thread(LITTLE_CORES)
         self.ser = serial.Serial(port, baud, timeout=0.1)
         self.ik = self._init_ik(urdf_path)
         self._configure_motors()
@@ -124,6 +127,25 @@ class ArmController:
         cmd = struct.pack("<BBBBBBH", 0xFF, 0xFF, 6, 5, 0x03, 0x2A, pulse)
         cks = (~sum(cmd[2:]) & 0xFF)
         self.ser.write(cmd + struct.pack("<B", cks))
+
+    def emergency_stop(self):
+        """紧急停止：清空串口缓冲区 + 关闭全部舵机力矩"""
+        import time
+        try:
+            self.ser.reset_output_buffer()
+            self.ser.reset_input_buffer()
+            for sid in range(1, 7):
+                cmd = struct.pack("<BBBBBBB", 0xFF, 0xFF, sid, 4, 0x03, 0x28, 0)
+                cks = (~sum(cmd[2:]) & 0xFF)
+                self.ser.write(cmd + struct.pack("<B", cks))
+                time.sleep(0.002)
+        except Exception:
+            pass
+
+    def write_angles(self, angles_rad):
+        """批量写入 6 个关节角度（弧度）"""
+        for sid in range(1, 7):
+            self._write_angle(sid, float(angles_rad[sid - 1]))
 
     def close(self):
         self.ser.close()

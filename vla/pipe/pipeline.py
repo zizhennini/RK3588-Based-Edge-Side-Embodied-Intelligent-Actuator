@@ -2,7 +2,6 @@
 import cv2
 import time
 import numpy as np
-from vla.vlm import VLMBase
 from vla.vision import ColorLocator
 from vla.control import ArmController
 
@@ -18,7 +17,7 @@ class State:
 class VLApipeline:
     """VLM 场景理解 + ColorLocator 定位 → Depth → IK"""
 
-    def __init__(self, arm: ArmController, vlm: VLMBase, camera_matrix):
+    def __init__(self, arm: ArmController, vlm, camera_matrix):
         self.arm = arm
         self.vlm = vlm
         self.K = camera_matrix

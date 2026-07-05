@@ -22,6 +22,12 @@ VLM_MODEL_NAME = "qwen3.5"
 VLM_MODEL_PATH = "./models/Qwen3.5-0.8B"
 VLM_DEMO_BIN = "./models/Qwen3.5-0.8B/demo"
 
+# ── 内存管理配置 ──
+VLM_IDLE_UNLOAD_TIMEOUT = 30  # VLM 闲置秒数后自动卸载
+VLM_MEMORY_BUDGET_MB = 900     # VLM 推理预估内存占用
+RECORDING_MEMORY_BUDGET_MB = 256  # 录像编码预估内存占用
+MEMORY_RESERVE_MB = 200         # 系统预留内存余量
+
 # ── MobileNet SSD 配置 ──
 SSD_PROTOTXT = "./models/MobileNetSSD/MobileNetSSD_deploy.prototxt"
 SSD_CAFFEMODEL = "./models/MobileNetSSD/MobileNetSSD_deploy.caffemodel"
