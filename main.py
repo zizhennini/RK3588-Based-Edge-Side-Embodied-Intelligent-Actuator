@@ -12,7 +12,7 @@ from config.settings import (
 )
 from config.cpu_affinity import bind_current_thread, BIG_CORES, affinity_summary
 from config.memory import MemoryMonitor
-from astra import AstraProCamera
+from astra import D435iCamera
 from vla.vlm.smart_vlm import SmartVLM, IdleUnloader
 from vla.vision import ColorLocator
 from vla.control import ArmController
@@ -40,7 +40,7 @@ def main():
         unloader.start()
 
         print("[VLA] 打开 Astra Pro ...")
-        cam = AstraProCamera(CAMERA_INDEX)
+        cam = D435iCamera(CAMERA_INDEX)
         cam.connect()
 
         locator = ColorLocator(CAMERA_MATRIX)
