@@ -1,0 +1,41 @@
+# LICENSE
+
+MIT License
+
+Copyright \(c\) 2026 zizhennini
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files \(the "Software"\), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software\.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT\. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE\.
+
+## Supplementary Open Source Statement
+
+This project relies on multiple third\-party open source frameworks and tools, including but not limited to Rockchip RK3588 SDK, LeRobot, sherpa\-onnx, FFmpeg, Intel RealSense SDK\. All dependent components follow their respective open source licenses\. Any secondary developer must comply with the license terms of the original dependent projects while using this Software\.
+
+## Special Safety Reminder
+
+This software controls physical robotic hardware\. The author shall not be liable for any mechanical collision, hardware damage, personal injury or property loss caused by improper calibration, incorrect trajectory parameters, lack of manual supervision or unauthorized autonomous operation of the robotic arm\. All hardware experiments shall be operated by professional personnel with safety protection measures\.
+
+### Usage Guide
+
+1. Save the above content as a file named `LICENSE` \(no file suffix\) and place it in the root directory of the GitHub repository;
+
+2. All derived projects, modified copies, teaching documents and published papers based on this project need to retain this complete LICENSE text;
+
+3. Commercial use is allowed, no royalty fees required, but original copyright attribution must be reserved\.
+
+> （注：部分内容可能由 AI 生成）
