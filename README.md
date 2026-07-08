@@ -1,97 +1,427 @@
-# RK3588-EIA
+# RK3588-Based Edge-Side Embodied Intelligent Actuator
 
-**Embedded Intelligent Actuator** — 端侧具身智能教育平台
+A lightweight edge-side embodied intelligence platform based on the Rockchip RK3588.  
+The system integrates offline speech interaction, visual-language reasoning, leader-follower demonstration, motion-library replay, safety checking, and robotic-arm execution into a local closed-loop workflow.
 
-RK3588 NPU 端侧部署 VLA（Vision-Language-Action），支持语音交互 + VLM 理解 + 机械臂抓取，全链路在端侧运行，无需联网。
+> 中文简介：本项目是一套基于 RK3588 的端侧具身智能执行器，面向高校机器人教学、具身智能实验和桌面级自动化演示场景，实现“语音/文字指令 → 视觉理解 → 任务调度 → 机械臂执行”的本地化闭环。
 
 ---
 
-## 快速开始
+## 1. Project Overview
 
-```bash
-conda activate rkvla
-cd /home/elf/work/RK3588-EIA
+This project is designed around an RK3588 edge-computing board and a 6-DOF SO-ARM101 robotic arm. It combines local multimodal inference, offline speech processing, trajectory recording/replay, and hardware-accelerated video recording.
 
-# 统一菜单
-python3 menu.py
+The system is suitable for:
 
-# 语音唤醒
-python3 va.py listen-forever --wake-mode kws
+- embodied AI teaching and research;
+- robotic-arm demonstration and motion-library construction;
+- voice-driven visual question answering;
+- simple tabletop grasping and placement experiments;
+- offline AI education scenarios without cloud dependency.
 
-# 录音问答
-python3 va.py once
+---
 
-# 文字问答
-python3 va.py ask "1+1等于几"
+## 2. Key Features
 
-# 文字问答（拍照）
-python3 va.py ask "画面中有什么"
+### Edge-side multimodal interaction
 
-# Web 控制面板
-python3 webui.py
-# 浏览器打开 http://192.168.137.100:8080
+- Offline keyword wake-up, ASR and TTS based on `sherpa-onnx`.
+- Text or voice command input.
+- Local VLM reasoning through Qwen-based multimodal inference.
+- Supports visual question answering and target description.
+
+### Robotic-arm control
+
+- SO-ARM101 6-DOF robotic arm control.
+- Feetech serial servo communication.
+- Cartesian-space motion command and direct joint-angle writing.
+- Gripper control and emergency stop interface.
+
+### Leader-follower demonstration and motion replay
+
+- Reads the leader arm joint states.
+- Converts servo pulse values into joint angles.
+- Maps leader-arm motion to the follower arm.
+- Records demonstration trajectories.
+- Applies duplicate-frame removal, median filtering, velocity limiting and safety checking.
+- Replays verified trajectories at a fixed frame rate.
+- Stores stable motions in the motion library for later task calls.
+
+### Motion-library management
+
+- Record, inspect, delete and replay motion files.
+- Supports voice or text command triggering.
+- Supports loop replay, pause/continue and manual review.
+- Provides reusable action templates for downstream VLM-assisted tasks.
+
+### Vision and grasping
+
+- Uses Intel RealSense D435i RGB-D camera.
+- Combines visual-language recognition with depth information.
+- Supports target localization and simple grasp/place demonstrations.
+- Provides dry-run mode for safe testing before real execution.
+
+### Hardware-accelerated experiment recording
+
+- Uses FFmpeg with `h264_rkmpp` hardware encoder for video encoding.
+- Can combine RGA hardware unit for scaling and OSD information overlay.
+- Reduces CPU occupation during experiment recording.
+- Useful for experiment replay, debugging and competition videos.
+
+---
+
+## 3. System Architecture
+
+```mermaid
+flowchart LR
+    A[Voice / Text Command] --> B[Intent Recognition]
+    B --> C{Task Type}
+
+    C -->|VQA / Visual Reasoning| D[Camera Capture]
+    D --> E[VLM Inference]
+    E --> F[Answer / Target Result]
+
+    C -->|Motion Replay| G[Motion Library]
+    G --> H[Trajectory Safety Check]
+    H --> I[Command Queue]
+
+    C -->|Robotic Control| I[Command Queue]
+
+    I --> J[Arm Controller]
+    J --> K[Feetech Servos]
+    K --> L[SO-ARM101 Robotic Arm]
+
+    M[D435i / USB Camera] --> N[Recorder]
+    N --> O[h264_rkmpp / RGA]
+    O --> P[Experiment Video]
 ```
 
-## 功能列表
+---
 
-| 功能 | 命令 | 说明 |
-|------|------|------|
-| 语音唤醒 | `va.py listen-forever` | KWS 检测"你好同学"唤醒 |
-| 语音识别 | `va.py once` | 录音 -> ASR -> VLM -> TTS |
-| 文字问答 | `va.py ask <text>` | Qwen3.5 VLM 回答 + TTS 播报 |
-| 遥操作 | `scripts/teleop_record.py` | 主臂拖拽 -> 从臂跟随 |
-| 动作录制 | `scripts/develop_motion.py` | 录制 -> 平滑 -> 入库 |
-| 动作回放 | `scripts/replay_traj.py` | 30fps 帧间插值回放 |
-| 动作库管理 | `scripts/record_trajectory.py` | 查看/删除动作 |
-| 硬件录像 | `scripts/recorder.py` | h264_rkmpp 编码 |
-| 系统监控 | `scripts/monitor.py` | CPU/内存/NPU 实时监控 |
-| 任务控制器 | `scripts/task_controller.py` | 多工序任务编排 |
-| VLM 抓取 | `scripts/vlm_grasp.py` | VLM+PCA+IK 视觉抓取 |
+## 4. Hardware Requirements
 
-## 语音指令（动作库）
+| Module | Recommended Device |
+|---|---|
+| Edge computing board | RK3588 development board, 16 GB RAM recommended |
+| Robotic arm | SO-ARM101 6-DOF robotic arm |
+| Servo | Feetech STS3215 or compatible serial servo |
+| Camera | Intel RealSense D435i RGB-D camera |
+| Audio input | USB microphone |
+| Audio output | Speaker or USB audio device |
+| Connection | USB / TTL serial adapter |
 
-| 说 | 动作 |
-|----|------|
-| "你好" | 打招呼 |
-| "抬起" | 抬升动作 |
-| "抓" | 抓取动作 |
-| "停止" | 紧急停止 |
-| "有什么动作" | 列出动作库 |
-| "归零" | 归零位 |
+---
 
-## 核心特性
+## 5. Software Stack
 
-| 特性 | 说明 |
-|------|------|
-| 大小核算力隔离 | A76 大核(4-7)跑推理, A55 小核(0-3)跑控制 |
-| 分级内存管控 | VLM 按需加载/闲置30s卸载(~900MB) |
-| 指令队列+中断 | FIFO 串行执行, 紧急中断清空队列+物理停机 |
-| 全离线语音 | sherpa-onnx KWS + ASR + TTS, 无需联网 |
-| 流式 TTS 缓冲 | 独立线程预填缓冲, 消除音频中断 |
+| Layer | Technology |
+|---|---|
+| Operating system | Linux on RK3588 |
+| Main language | Python 3.10 |
+| Speech module | sherpa-onnx KWS / ASR / TTS |
+| Vision module | OpenCV, pyrealsense2 |
+| VLM inference | Qwen-based multimodal model, RKNN / RKLLM deployment |
+| Arm control | LeRobot-style control interface, Feetech serial protocol |
+| Video recording | FFmpeg, h264_rkmpp, scale_rkrga |
+| Task scheduling | FIFO command queue and interrupt mechanism |
 
-## 硬件
+---
 
-| 组件 | 型号 |
-|------|------|
-| SoC | Rockchip RK3588 (4xA76 + 4xA55, 6TOPS NPU, 8GB) |
-| 机械臂 | SO-ARM101 6-DOF + 夹爪, Feetech STS3215 |
-| 深度相机 | Intel RealSense D435i |
-| 手柄 | 北通蝙蝠4 (BD4A) |
+## 6. Repository Structure
 
-## 测试完成状态
+The actual structure may vary slightly depending on the development branch.
 
-| 模块 | 状态 |
-|------|------|
-| KWS 唤醒词 | 完成 |
-| ASR 语音识别 | 完成 (0.17s) |
-| TTS 语音合成 | 完成 (0.43s) |
-| VLM 视觉问答 | 完成 (2.8s) |
-| 机械臂 IK 控制 | 完成 |
-| 示教录制 -> 回放 | 完成 |
-| 语音触发回放 | 完成 |
-| 硬件加速录像 | 完成 |
-| 指令队列+中断 | 完成 |
-| 分级内存管控 | 完成 |
-| 大小核算力隔离 | 完成 |
-| 系统资源监控 | 完成 |
-| VLM 自主抓取 | 开发中 |
+```text
+.
+├── main.py                         # Main VLA entry
+├── va.py                           # Voice assistant entry
+├── config/                         # System configuration
+│   ├── settings.py
+│   ├── safety.py
+│   └── teaching.py
+├── vla/
+│   ├── command_queue.py            # FIFO command queue and interrupt handling
+│   ├── control/                    # Robotic-arm controller
+│   └── vlm/                        # VLM loading and inference wrapper
+├── voice_assistant/                # KWS / ASR / TTS module
+├── scripts/
+│   ├── develop_motion.py           # Demonstration recording and motion-library workflow
+│   ├── record_trajectory.py        # Motion recording / list / inspect / delete
+│   ├── smooth_trajectory.py        # Batch smoothing and trajectory validation
+│   ├── replay_traj.py              # Trajectory replay
+│   ├── vlm_grasp.py                # VLM-assisted grasping demo
+│   ├── recorder.py                 # Hardware-accelerated video recording
+│   └── task_controller.py          # Multi-step task controller
+├── motion_library/                 # Recorded and verified motion files
+├── task_library/                   # Multi-step task definitions
+├── recordings/                     # Experiment videos
+└── docs/                           # Project documentation
+```
+
+---
+
+## 7. Installation
+
+### 7.1 Clone the repository
+
+```bash
+git clone https://github.com/zizhennini/RK3588-Based-Edge-Side-Embodied-Intelligent-Actuator.git
+cd RK3588-Based-Edge-Side-Embodied-Intelligent-Actuator
+```
+
+### 7.2 Create Python environment
+
+```bash
+conda create -n rk3588-eia python=3.10 -y
+conda activate rk3588-eia
+pip install -r requirements.txt
+```
+
+### 7.3 Check device connection
+
+```bash
+ls /dev/ttyACM*
+ls /dev/video*
+```
+
+Update the serial port and camera index in the configuration file if necessary.
+
+```python
+SERIAL_PORT = "/dev/ttyACM0"
+CAMERA_INDEX = 21
+VLM_MODEL_PATH = "./models/Qwen3.5-0.8B"
+```
+
+### 7.4 Check RK3588 hardware encoding
+
+```bash
+ffmpeg -encoders | grep h264_rkmpp
+ffmpeg -filters | grep rkrga
+```
+
+If `h264_rkmpp` or `scale_rkrga` is not available, install an RK3588-compatible FFmpeg build with Rockchip MPP/RGA support.
+
+---
+
+## 8. Quick Start
+
+### 8.1 Start voice assistant
+
+```bash
+python3 va.py listen-forever
+```
+
+Single-round speech recognition:
+
+```bash
+python3 va.py once --seconds 4
+```
+
+Text-based interaction:
+
+```bash
+python3 va.py ask "介绍一下你自己"
+```
+
+Visual question answering:
+
+```bash
+python3 va.py ask "画面中有什么？" --no-speak
+```
+
+---
+
+### 8.2 Motion-library management
+
+List existing actions:
+
+```bash
+python3 scripts/record_trajectory.py list
+```
+
+Inspect one trajectory:
+
+```bash
+python3 scripts/record_trajectory.py inspect motion_library/greeting_01.json
+```
+
+Batch smooth and validate trajectories:
+
+```bash
+python3 scripts/smooth_trajectory.py
+```
+
+Replay a trajectory:
+
+```bash
+python3 scripts/replay_traj.py motion_library/greeting_01.json --port /dev/ttyACM0
+```
+
+---
+
+### 8.3 Demonstration recording workflow
+
+The recommended workflow is:
+
+```text
+leader-follower demonstration
+        ↓
+trajectory recording
+        ↓
+duplicate-frame removal
+        ↓
+median filtering
+        ↓
+velocity limiting
+        ↓
+safety checking
+        ↓
+manual review
+        ↓
+motion-library storage
+        ↓
+voice/text triggered replay
+```
+
+Run the motion development script:
+
+```bash
+python3 scripts/develop_motion.py
+```
+
+---
+
+### 8.4 VLM-assisted grasping demo
+
+Run in dry-run mode first:
+
+```bash
+python3 scripts/vlm_grasp.py "红色杯子" \
+  --teach-trajectory grasp_01.json \
+  --ref-cx 320 \
+  --ref-cy 240 \
+  --ref-z 0.3 \
+  --dry-run
+```
+
+After confirming the output and safety check, remove `--dry-run` to execute the real robotic-arm motion.
+
+---
+
+### 8.5 Experiment recording
+
+Basic recording:
+
+```bash
+python3 scripts/recorder.py --duration 5
+```
+
+Recording with OSD text:
+
+```bash
+python3 scripts/recorder.py --duration 5 --osd "Experiment Record"
+```
+
+The video will be saved to the `recordings/` directory by default.
+
+---
+
+## 9. Configuration
+
+Common configuration items:
+
+| Item | Description |
+|---|---|
+| `SERIAL_PORT` | Robotic-arm serial port |
+| `SERIAL_BAUD` | Servo bus baud rate |
+| `CAMERA_INDEX` | RGB camera index |
+| `CAMERA_MATRIX` | Camera intrinsic parameters |
+| `CAMERA_POSITION` | Camera position relative to arm base |
+| `VLM_MODEL_PATH` | Local VLM model path |
+| `VLM_IDLE_UNLOAD_TIMEOUT` | Idle timeout for unloading VLM |
+| `VLM_MEMORY_BUDGET_MB` | Memory budget for VLM inference |
+| `RECORDING_MEMORY_BUDGET_MB` | Memory budget for recording task |
+
+Before real robotic-arm execution, check:
+
+- joint direction;
+- joint limit range;
+- servo ID mapping;
+- camera index;
+- camera intrinsic and extrinsic parameters;
+- workspace boundary;
+- emergency-stop behavior.
+
+---
+
+## 10. Safety Notes
+
+Robotic-arm execution can cause collision or hardware damage if the workspace is not calibrated correctly. Always follow these rules:
+
+1. Test new trajectories in dry-run mode first.
+2. Keep the robotic arm away from people during replay.
+3. Check joint limits before writing servo commands.
+4. Use low speed for first-time motion verification.
+5. Make sure emergency stop is available.
+6. Do not run autonomous grasping without camera calibration and manual supervision.
+
+---
+
+## 11. Current Development Status
+
+| Function | Status |
+|---|---|
+| Offline KWS / ASR / TTS | Supported |
+| Text / voice interaction | Supported |
+| VLM visual reasoning | Supported, model path required |
+| Leader-follower demonstration | Supported |
+| Trajectory smoothing and replay | Supported |
+| Motion-library management | Supported |
+| VLM-assisted grasping | Experimental |
+| Hardware video recording | Supported on RK3588 environment |
+| RGA scaling and OSD overlay | Environment-dependent |
+| Full autonomous general manipulation | Under development |
+
+---
+
+## 12. Roadmap
+
+- Improve VLM output parsing and robustness.
+- Add more grasping task templates.
+- Improve camera-hand calibration workflow.
+- Add more safety monitoring based on depth and servo current.
+- Provide a web dashboard for classroom demonstration.
+- Support more robot arms and end-effectors.
+- Improve dataset export for imitation-learning experiments.
+
+---
+
+## 13. Academic and Educational Use
+
+This project is mainly designed for teaching, research and competition demonstration. It can be used to help students understand:
+
+- edge AI deployment;
+- multimodal human-robot interaction;
+- robotic-arm kinematics;
+- trajectory recording and replay;
+- embodied intelligence task pipeline;
+- hardware acceleration on RK3588.
+
+---
+
+## 14. License
+
+Please refer to the `LICENSE` file if it is provided in this repository.  
+If no license is included, please add an appropriate open-source license before public distribution or reuse.
+
+---
+
+## 15. Acknowledgements
+
+This project is built with inspiration from open-source robotics, edge AI and multimodal model deployment communities, including:
+
+- Rockchip RK3588 ecosystem;
+- LeRobot-style robotic-arm control;
+- sherpa-onnx offline speech processing;
+- FFmpeg Rockchip hardware acceleration;
+- Intel RealSense RGB-D camera ecosystem.
