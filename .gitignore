@@ -19,6 +19,10 @@ tokenizer.model
 # 模型二进制
 *.rkllm
 *.rknn
+*.onnx
+
+# 语音模型库
+voice_assistant/voice_assistant/models/
 
 # 运行时库
 scripts/demo/
