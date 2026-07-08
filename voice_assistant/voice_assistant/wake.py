@@ -44,6 +44,7 @@ class SherpaKeywordWake:
         )
 
     def wait(self, timeout: int | None = None) -> str:
+        subprocess.run(["fuser", "-k", "/dev/snd/pcmC1D0c"], capture_output=True)
         stream = self.spotter.create_stream()
         cmd = [
             "arecord",
@@ -118,7 +119,7 @@ class SttKeywordWake:
     def __init__(self, config: dict, temp_dir: Path):
         self.config = config
         self.temp_dir = temp_dir
-        self.wake_words = ("鲁班猫", "拍照助手")
+        self.wake_words = ("你好同学", "拍照助手")
         self.chunk_seconds = int(config["audio"].get("wake_chunk_seconds", 2))
         self.recorder = AudioRecorder(config)
         self.asr = SherpaAsr(config)

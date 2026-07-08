@@ -1,22 +1,91 @@
 {
+  "_目录结构": "motion_library/{category}/{name}.json",
   "greeting": {
-    "file": "",
-    "keywords": ["你好", "打招呼", "hi", "hello", "您好"],
-    "duration_s": 0
+    "file": "greeting_01.json",
+    "keywords": [
+      "你好",
+      "打招呼",
+      "hi",
+      "hello",
+      "您好"
+    ],
+    "duration_s": 10,
+    "category": "social"
+  },
+  "抬起": {
+    "file": "lift/抬起_01.json",
+    "keywords": [
+      "抬起",
+      "抬",
+      "lift"
+    ],
+    "duration_s": 10,
+    "category": "lift"
   },
   "grasp": {
-    "file": "",
-    "keywords": ["抓", "拿", "取", "抓取"],
-    "duration_s": 0
+    "file": "grasp/grasp_01.json",
+    "keywords": [
+      "抓",
+      "拿",
+      "取",
+      "抓取",
+      "夹取"
+    ],
+    "duration_s": 24,
+    "category": "grasp"
   },
-  "bow": {
+  "reach_left": {
     "file": "",
-    "keywords": ["鞠躬", "谢谢"],
-    "duration_s": 0
+    "keywords": [
+      "左边",
+      "左侧"
+    ],
+    "duration_s": 0,
+    "category": "reach"
   },
-  "wave": {
+  "reach_center": {
+    "file": "reach/reachcenter_01.json",
+    "keywords": [
+      "中间",
+      "正中",
+      "中心"
+    ],
+    "duration_s": 120,
+    "category": "reach"
+  },
+  "reach_right": {
     "file": "",
-    "keywords": ["挥手", "再见", "拜拜"],
-    "duration_s": 0
+    "keywords": [
+      "右边",
+      "右侧"
+    ],
+    "duration_s": 0,
+    "category": "reach"
+  },
+  "place": {
+    "file": "",
+    "keywords": [
+      "放置",
+      "放",
+      "放下"
+    ],
+    "duration_s": 0,
+    "category": "place"
+  },
+  "retract": {
+    "file": "",
+    "keywords": [
+      "回退",
+      "后退",
+      "退回"
+    ],
+    "duration_s": 0,
+    "category": "retract"
+  },
+  "抓取方块": {
+    "file": "grasp/抓取方块_01.json",
+    "keywords": [],
+    "duration_s": 30,
+    "category": "grasp"
   }
 }

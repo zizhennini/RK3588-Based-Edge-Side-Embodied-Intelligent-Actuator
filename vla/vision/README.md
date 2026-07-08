@@ -8,6 +8,7 @@
 |------|------|
 | `detector.py` | `MobileNetSSD` — CPU 目标检测，支持 COCO 20 类 |
 | `locator.py` | `ColorLocator` — HSV 颜色分割 + Depth 反投影（降级用） |
+| `ipm.py` | IPM 逆透视变换 |
 
 ## 检测流程
 
@@ -34,12 +35,6 @@ results = detector.detect(rgb, target_class="bottle")
 
 locator = ColorLocator(camera_matrix)
 pos = locator.locate(rgb, depth, "红色")
-```
-
-## 模型下载
-
-```bash
-python scripts/download_mobilenet.py
 ```
 
 ## COCO 20 类

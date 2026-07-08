@@ -1,7 +1,7 @@
 import sys, os, cv2, json, yaml, re, subprocess
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from astra import USBCamera
+from camera import USBCamera
 from config.settings import CAMERA_INDEX
 from vla.vision.ipm import IPM
 from voice_assistant.voice_assistant.qwen_runner import QwenRunner

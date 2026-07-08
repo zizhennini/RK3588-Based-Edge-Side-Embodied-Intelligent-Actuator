@@ -9,7 +9,7 @@ from config.settings import (
     CAMERA_MATRIX, SERIAL_PORT, SERIAL_BAUD,
     VLM_MODEL_NAME, VLM_MODEL_PATH, VLM_DEMO_BIN,
 )
-from astra import AstraProCamera
+from camera import D435iCamera as AstraProCamera
 from vla.vlm import create_vlm
 from vla.vision import ColorLocator
 from vla.control import ArmController

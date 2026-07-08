@@ -10,7 +10,7 @@ from config.settings import (
 SSD_PROTOTXT = "./models/MobileNetSSD/MobileNetSSD_deploy.prototxt"
 SSD_CAFFEMODEL = "./models/MobileNetSSD/MobileNetSSD_deploy.caffemodel"
 SSD_CONFIDENCE = 0.5
-from astra import AstraProCamera
+from camera import D435iCamera as AstraProCamera
 from vla.vlm import create_vlm
 from vla.vision import MobileNetSSD, ColorLocator
 

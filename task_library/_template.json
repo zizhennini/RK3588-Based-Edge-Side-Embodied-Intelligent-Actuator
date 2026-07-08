@@ -1,0 +1,27 @@
+{
+  "_说明": "标准化关节空间轨迹文件模板",
+  "_命名规则": "{动作}_{序号:02d}.json，如 grasp_01.json",
+  "_分类": {
+    "reach": "接近目标位",
+    "grasp": "抓取动作",
+    "lift": "抬升动作",
+    "place": "放置动作",
+    "retract": "回退动作"
+  },
+  "meta": {
+    "name": "reach_01",
+    "category": "reach",
+    "fps": 30,
+    "total_frames": 0,
+    "duration_s": 0.0,
+    "smoothed": true
+  },
+  "frames": [
+    {
+      "t": 0.0,
+      "J1": 0.0, "J2": 0.0, "J3": -1.2, "J4": 0.0, "J5": 0.0, "J6": 0.0,
+      "shoulder_pan": 0.0, "shoulder_lift": 0.0, "elbow_flex": -1.2,
+      "wrist_flex": 0.0, "wrist_roll": 0.0, "gripper": 0.0
+    }
+  ]
+}

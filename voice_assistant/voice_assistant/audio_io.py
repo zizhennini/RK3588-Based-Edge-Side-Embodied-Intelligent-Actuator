@@ -114,5 +114,7 @@ class PcmSpeakerStream:
             str(self.sample_rate),
             "-c",
             str(self.channels),
+            "--buffer-size=65536",
+            "--period-size=8192",
         ]
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)

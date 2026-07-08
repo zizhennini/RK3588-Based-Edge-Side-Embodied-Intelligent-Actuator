@@ -24,6 +24,8 @@ def main():
     parser.add_argument("traj_file")
     parser.add_argument("--fps", type=int, default=15)
     parser.add_argument("--port", default=SERIAL_PORT)
+    parser.add_argument("--home", action="store_true", help="回放结束后自动归零")
+    parser.add_argument("--initial", action="store_true", help="回放结束后回到初始态(等待位)")
     args = parser.parse_args()
 
     with open(args.traj_file) as f:
@@ -35,6 +37,18 @@ def main():
     arm = ArmController(args.port, SERIAL_BAUD)
     print("回放中 ({}FPS)...".format(args.fps))
     t0 = time.perf_counter()
+
+    def send_frame(f):
+        for sid, (k1, k2) in enumerate(JOINT_KEYS, 1):
+            val = get_val(f, k1, k2)
+            if sid == 6:
+                raw = int((val / 100) * (G_MAX - G_MIN) + G_MIN)
+                raw = max(G_MIN, min(G_MAX, raw))
+                cmd = struct.pack("<BBBBBBH", 0xFF, 0xFF, 6, 5, 0x03, 0x2A, raw)
+                cks = (~sum(cmd[2:]) & 0xFF)
+                arm.ser.write(cmd + struct.pack("<B", cks))
+            else:
+                arm._write_angle(sid, float(np.deg2rad(val)))
 
     for f_idx in range(len(frames) - 1):
         f0, f1 = frames[f_idx], frames[f_idx + 1]
@@ -61,7 +75,15 @@ def main():
         if (f_idx + 1) % 30 == 0:
             print("  {}/{}".format(f_idx + 1, len(frames)))
 
+    # 发送最后一帧
+    send_frame(frames[-1])
     print("完成: {:.1f}s".format(time.perf_counter() - t0))
+    if args.home or args.initial:
+        print("归零中...")
+        arm.write_angles(arm.HOME_POSE)
+        time.sleep(2)
+        print("归零中...")
+        arm.home(steps=30, delay_s=0.03)
     arm.close()
 
 

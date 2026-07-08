@@ -1,54 +1,53 @@
 from __future__ import annotations
 
-import shutil
-import subprocess
 from datetime import datetime
 from pathlib import Path
+
+import cv2
+import numpy as np
 
 
 class CameraAdapter:
     def __init__(self, config: dict):
-        paths = config["paths"]
-        self.capture_script = Path(paths["capture_script"])
-        self.temp_dir = Path(paths["temp_dir"])
-        self.photo_dir = Path(paths["photo_dir"])
+        self.photo_dir = Path(config["paths"]["photo_dir"])
+        self.camera_index = int(config["audio"].get("camera_index", 21))
 
     def capture(self) -> Path:
-        work_dir = self.temp_dir / "capture_work"
-        work_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        cmd = [
-            str(self.capture_script),
-            "--out-dir",
-            str(work_dir),
-            "--prefix",
-            "voice",
-            "--timestamp",
-            timestamp,
-        ]
-        proc = subprocess.run(cmd, check=True, text=True, capture_output=True)
-        parsed = self._parse_key_values(proc.stdout)
-        jpg = Path(parsed["jpg"])
-        raw = parsed.get("raw")
-        if not raw:
-            self.photo_dir.mkdir(parents=True, exist_ok=True)
-            final_jpg = self.photo_dir / jpg.name
-            shutil.move(str(jpg), str(final_jpg))
-            return final_jpg
-        raw_path = Path(raw)
         self.photo_dir.mkdir(parents=True, exist_ok=True)
-        final_jpg = self.photo_dir / jpg.name
-        shutil.move(str(jpg), str(final_jpg))
-        raw_path.unlink(missing_ok=True)
-        return final_jpg
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        out = self.photo_dir / f"voice_{timestamp}.jpg"
+        bgr = self._capture_bgr(timestamp)
+        cv2.imwrite(str(out), bgr, [cv2.IMWRITE_JPEG_QUALITY, 98])
+        return out
 
-    @staticmethod
-    def _parse_key_values(text: str) -> dict[str, str]:
-        result: dict[str, str] = {}
-        for line in text.splitlines():
-            if "=" in line:
-                key, value = line.split("=", 1)
-                result[key.strip()] = value.strip()
-        if "jpg" not in result:
-            raise RuntimeError(f"capture script did not report jpg path: {text}")
-        return result
+    def _capture_bgr(self, timestamp: str) -> np.ndarray:
+        try:
+            import pyrealsense2 as rs
+            pipe = rs.pipeline()
+            cfg = rs.config()
+            cfg.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+            profile = pipe.start(cfg)
+            sensor = profile.get_device().first_color_sensor()
+            for opt in (rs.option.enable_auto_exposure,
+                        rs.option.enable_auto_white_balance):
+                if sensor.supports(opt):
+                    sensor.set_option(opt, 1)
+            for _ in range(15):
+                pipe.wait_for_frames()
+            frames = pipe.wait_for_frames()
+            color = frames.get_color_frame()
+            pipe.stop()
+            if color:
+                return np.asanyarray(color.get_data())
+        except Exception:
+            pass
+        import subprocess
+        dev = f"/dev/video{self.camera_index}"
+        tmp = f"/tmp/voice_cap_{timestamp}.jpg"
+        subprocess.run(["ffmpeg", "-f", "v4l2", "-video_size", "640x480",
+            "-i", dev, "-vframes", "1", "-y", tmp], capture_output=True, timeout=10)
+        img = cv2.imread(tmp)
+        if img is not None:
+            Path(tmp).unlink(missing_ok=True)
+            return img
+        raise RuntimeError(f"无法从 {dev} 获取图像")

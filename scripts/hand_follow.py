@@ -2,7 +2,7 @@
 import sys, time, cv2, numpy as np
 sys.path.insert(0, ".")
 
-from astra import USBCamera
+from camera import USBCamera
 from vla.control import ArmController
 from config.settings import CAMERA_INDEX, SERIAL_PORT, SERIAL_BAUD
 from rknnlite.api import RKNNLite

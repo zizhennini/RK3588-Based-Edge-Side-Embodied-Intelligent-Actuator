@@ -2,7 +2,7 @@
 import sys, os, json, yaml, cv2, numpy as np, re, subprocess, time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from astra import D435iCamera
+from camera import D435iCamera
 from voice_assistant.voice_assistant.qwen_runner import QwenRunner
 
 PROJ = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

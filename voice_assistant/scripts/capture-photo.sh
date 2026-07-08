@@ -6,7 +6,7 @@ width="1920"
 height="1080"
 pixfmt="MJPG"
 skip="5"
-out_dir="/home/elf/work/Qwen-Chat-Assistant/photos"
+out_dir="/home/elf/work/RK3588-EIA/voice_assistant/photos"
 prefix="camera"
 timestamp=""
 

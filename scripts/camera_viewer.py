@@ -4,7 +4,7 @@ import sys, os, threading
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import cv2
-from astra import USBCamera
+from camera import USBCamera
 from vla.vlm import create_vlm
 from config.settings import VLM_MODEL_NAME, VLM_MODEL_PATH, VLM_DEMO_BIN, CAMERA_INDEX
 

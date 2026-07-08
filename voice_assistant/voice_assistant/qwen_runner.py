@@ -8,6 +8,8 @@ from typing import Callable
 
 import pexpect
 from pexpect.exceptions import EOF, TIMEOUT, ExceptionPexpect
+from config.cpu_affinity import bind_subprocess_args, BIG_CORES
+
 
 
 class QwenRunner:
@@ -102,9 +104,10 @@ class QwenRunner:
             str(self.qwen["img_end"]),
             str(self.qwen["img_content"]),
         ]
+        taskset = bind_subprocess_args(BIG_CORES)
         return pexpect.spawn(
-            args[0],
-            args[1:],
+            taskset[0],
+            taskset[1:] + args,
             cwd=str(self.project_dir),
             env=env,
             encoding="utf-8",

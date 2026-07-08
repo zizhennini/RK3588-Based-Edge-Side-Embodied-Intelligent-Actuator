@@ -2,7 +2,7 @@
 import sys, os, json, yaml, cv2, numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from astra import D435iCamera
+from camera import D435iCamera
 from voice_assistant.voice_assistant.qwen_runner import QwenRunner
 
 # 1. 初始化 D435i

@@ -65,7 +65,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    assistant = VoiceAssistant(load_config(args.config))
+    cfg = load_config(args.config)
+
+    import os, subprocess
+    proj = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    def motion_cb(action, info):
+        traj = os.path.join(proj, "motion_library", info["file"])
+        cmd = [sys.executable, os.path.join(proj, "scripts", "replay_traj.py"),
+               traj, "--port", "/dev/ttyACM0", "--fps", "30", "--initial"]
+        print(f"[执行] {' '.join(cmd)}", flush=True)
+        subprocess.Popen(cmd, start_new_session=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    assistant = VoiceAssistant(cfg, motion_cb=motion_cb)
 
     try:
         _run_command(args, assistant)

@@ -71,14 +71,17 @@ def smooth_file(input_path, output_path=None, median_win=3, fps=30):
     if len(frames) >= 2:
         t_start, t_end = frames[0]["t"], frames[-1]["t"]
         dt = 1.0 / fps
-        new_times = np.arange(t_start, t_end, dt)
+        n_steps = max(2, int(round((t_end - t_start) / dt)) + 1)
+        new_times = np.linspace(t_start, t_end, n_steps)
+        # 预计算原数据
+        old_t = [f["t"] for f in frames]
+        old_by_joint = {name: [f[name] for f in frames] for name in JOINTS}
         new_frames = []
         for t in new_times:
             nf = {"t": round(t, 3)}
             for j, name in enumerate(JOINTS):
-                old_vals = [f[name] for f in frames]
-                old_t = [f["t"] for f in frames]
-                nf[name] = round(float(np.interp(t, old_t, old_vals)), 1)
+                val = np.interp(t, old_t, old_by_joint[name])
+                nf[name] = round(float(val), 1)
                 nf[JOINT_ALIAS[name]] = nf[name]
             new_frames.append(nf)
         frames = new_frames

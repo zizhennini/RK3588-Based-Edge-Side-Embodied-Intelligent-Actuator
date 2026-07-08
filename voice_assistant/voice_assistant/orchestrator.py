@@ -11,23 +11,30 @@ from .intent import IntentRouter
 from .qwen_runner import QwenRunner
 from .streaming_tts import StreamingTtsPlayer
 from .wake import SherpaKeywordWake, SttKeywordWake
+from config.cpu_affinity import bind_current_thread, BIG_CORES
+from config.memory import MemoryMonitor, MemoryLimiter
 
 
 class VoiceAssistant:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, motion_cb=None):
+        bind_current_thread(BIG_CORES)
         self.config = config
         self.temp_dir = Path(config["paths"]["temp_dir"])
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.intent = IntentRouter.from_config(config)
-
-    def transcribe_wav(self, wav_path: str | Path) -> str:
-        return SherpaAsr(self.config).transcribe_wav(wav_path)
+        self.memory = MemoryMonitor()
+        self.motion_cb = motion_cb
 
     def record_command(self, seconds: int | None = None) -> Path:
-        seconds = seconds or int(self.config["audio"]["command_seconds"])
-        out = self.temp_dir / "command.wav"
-        out.unlink(missing_ok=True)
-        return AudioRecorder(self.config).record_wav(out, seconds)
+        with MemoryLimiter(self.memory, "recording"):
+            seconds = seconds or int(self.config["audio"]["command_seconds"])
+            out = self.temp_dir / "command.wav"
+            out.unlink(missing_ok=True)
+            return AudioRecorder(self.config).record_wav(out, seconds)
+
+    def transcribe_wav(self, wav_path: str | Path) -> str:
+        with MemoryLimiter(self.memory, "asr"):
+            return SherpaAsr(self.config).transcribe_wav(wav_path)
 
     def wait_for_wake(self, mode: str = "kws", timeout: int | None = None) -> str:
         if mode == "stt":
@@ -79,6 +86,22 @@ class VoiceAssistant:
         speak: bool = True,
         play: bool = True,
     ) -> str:
+        # 匹配动作库指令
+        if self.motion_cb:
+            from vla.command_queue import MotionMatcher
+            matcher = MotionMatcher()
+            action_name, info = matcher.match(text)
+            if action_name and info.get("file"):
+                print(f"[动作] 匹配到: {action_name}")
+                if speak and play:
+                    tts = self.config["models"]["tts"]
+                    from .streaming_tts import StreamingTtsPlayer as STP
+                    p = STP(self.config)
+                    p.enqueue(f"执行动作{action_name}")
+                    p.close()
+                self.motion_cb(action_name, info)
+                return f"执行动作: {action_name}"
+        from .streaming_tts import StreamingTtsPlayer
         if speak and play:
             print("将使用流式 TTS：Qwen 每生成一句就直接写入喇叭 PCM 播放。", flush=True)
             player = StreamingTtsPlayer(self.config)

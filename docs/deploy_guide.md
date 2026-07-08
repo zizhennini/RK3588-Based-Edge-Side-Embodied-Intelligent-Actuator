@@ -7,72 +7,100 @@
 | LeRobot v0.4.4 | https://github.com/huggingface/lerobot/tree/v0.4.4 |
 | RKLLM 工具链 | https://github.com/airockchip/rknn-llm |
 | sherpa-onnx | https://github.com/k2-fsa/sherpa-onnx |
-| Qwen3-VL | https://github.com/QwenLM/Qwen3-VL |
+| Qwen3.5 | https://huggingface.co/Qwen/Qwen3.5-0.8B |
 | SO-ARM100/101 | https://github.com/TheRobotStudio/SO-ARM100 |
+| RealSense D435i | https://github.com/IntelRealSense/librealsense |
+| librga | https://github.com/airockchip/librga |
 
 ## 1. 系统准备
 
 ```bash
 # Ubuntu 22.04 / Arm64
 sudo apt update
-sudo apt install -y python3-pip python3-opencv cmake build-essential wget
+sudo apt install -y python3-pip python3-opencv cmake build-essential wget git
 ```
 
 ## 2. 项目安装
 
 ```bash
-# 创建 conda 环境
 conda create -n rkvla python=3.10 -y
 conda activate rkvla
+
+# 安装项目依赖
+cd /home/elf/work/RK3588-EIA
+pip install -r requirements.txt
 
 # LeRobot
 cd lerobot && pip install -e .[feetech] && cd ..
 
-# 项目依赖
-pip install -r requirements.txt
-
 # RKNN Lite（NPU 推理库）
 pip install /path/to/rknn_toolkit_lite2-*-cp310-*.whl
 
-# 启动相机取景
-python scripts/camera_viewer.py
+# 验证
+python3 -c "import cv2, numpy, sherpa_onnx, pyrealsense2; print('OK')"
 ```
 
-## 3. VLM 模型部署
+## 3. 模型部署
 
-模型文件放到 `models/Qwen3-VL-2B/`：
+### VLM 模型
+
+`models/Qwen3.5-0.8B/` 包含：
 
 ```
-qwen3-vl-2b_vision_rk3588.rknn   # 视觉编码器
-qwen3-vl-2b-instruct_w8a8_rk3588.rkllm  # LLM
+demo                          # Qwen3.5 C++ demo 程序
+lib/                          # RKLLM 运行时库
+Qwen3.5-0.8B_vision_rk3588.rknn   # 视觉编码器
+Qwen3.5-0.8B_w8a8_rk3588.rkllm    # LLM 模型
+demo.jpg                      # 占位图
 ```
 
-## 4. 语音模型部署
+### 语音模型
+
+`voice_assistant/voice_assistant/models/` 包含：
 
 ```bash
-# sherpa-onnx 语音模型放到 voice_assistant/models/
-voice_assistant/models/
-├── sherpa-onnx-kws-zipformer-zh-en-3M-*/   # KWS 唤醒词
-├── sherpa-onnx-conformer-zh-stateless2-*/  # ASR 语音识别
-├── matcha-icefall-zh-baker/                # TTS 声学模型
-└── vocos-22khz-univ.onnx                   # TTS 声码器
+voice_assistant/voice_assistant/models/
+├── sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/   # KWS 唤醒词
+├── sherpa-onnx-conformer-zh-stateless2-2023-05-23/   # ASR 语音识别
+├── matcha-icefall-zh-baker/                          # TTS 声学模型
+└── vocos-22khz-univ.onnx                             # TTS 声码器
 ```
 
-## 5. 标定
+## 4. 配置
+
+```bash
+# 默认配置直接使用
+# 如需修改相机索引，编辑：
+voice_assistant/config/default.yaml
+  → audio > camera_index: 21   # D435i RGB
+```
+
+## 5. 运行
+
+```bash
+conda activate rkvla
+cd /home/elf/work/RK3588-EIA
+
+# 语音助手 — 完整链路
+python3 va.py once
+
+# 文字问答
+python3 va.py ask "画面中有什么"
+
+# VLA 自主抓取
+python3 main.py
+
+# 语音触发动作
+python3 scripts/voice_motion.py
+```
+
+## 6. 标定
 
 ```bash
 # 机械臂标定
 lerobot-calibrate --robot.type=so101_follower --robot.port=/dev/ttyACM0 --robot.id=my_awesome_follower_arm
 lerobot-calibrate --teleop.type=so101_leader --teleop.port=/dev/ttyACM1 --teleop.id=my_awesome_leader_arm
-```
 
-## 6. 运行
-
-```bash
-# 语音助手
-conda activate rkvla
-cd voice_assistant && python voice_assistant.py once
-
-# VLA 自主抓取
-python main.py
+# 相机标定
+python3 astra/viewer.py
 ```
