@@ -62,7 +62,7 @@ The whole system operates completely offline without any dependence on cloud ser
 |Execution Manipulator|SO\-ARM101 6\-DOF Robotic Arm|Complete six\-joint rotation movement, equipped with clamping gripper for grasping and placing|
 |Drive Servo|Feetech STS3215 Serial Bus Servo|Control each joint rotation, support real\-time feedback of pulse value, joint angle and operating current|
 |Perception Camera|Intel RealSense D435i RGB\-D Depth Camera|Synchronously output RGB color image \+ depth spatial data, realize target 3D coordinate positioning|
-|Audio Input Device| Microphone|Collect voice commands for offline ASR recognition and keyword wake\-up|
+|Audio Input Device|USB Microphone|Collect voice commands for offline ASR recognition and keyword wake\-up|
 |Audio Output Device|Speaker / USB Audio Adapter|Play voice feedback synthesized by TTS module|
 |Communication Accessories|USB / TTL Serial Adapter|Realize serial communication between mainboard and servo bus of robotic arm|
 
@@ -464,4 +464,30 @@ Provide a lightweight, fully offline local experimental platform for embodied in
 
 2. Open Source Community Acknowledgement: The project draws technical inspiration and relies on multiple open\-source ecological projects, including Rockchip RK3588 official software ecosystem, LeRobot robotic arm control framework, sherpa\-onnx offline speech toolkit, FFmpeg Rockchip hardware acceleration module, Intel RealSense depth camera open\-source SDK\.
 
-> （注：部分内容可能由 AI 生成）
+# 10\. Open Source License \(MIT License\)
+
+## 10\.1 Full License Text
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files \(the "Software"\), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software\.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT\. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE\.
+
+## 10\.2 Copyright Statement
+
+Copyright \(c\) 2025 zizhennini
+
+## 10\.3 License Description \& Usage Rules
+
+This project adopts the open\-source MIT License, which is a permissive free software license with extremely low restrictions, suitable for academic teaching, scientific research, personal development and non\-commercial/commercial secondary development\. The specific usage specifications are as follows:
+
+1. **Allowed Behaviors**: Free use, code modification, secondary development, personal learning, university teaching experiments, academic research, open\-source redistribution, and commercial product integration without additional authorization fees\.
+
+2. **Mandatory Obligations**: Retain the original copyright and license statement of the project in the code repository, document description and derivative works of any secondary development and distribution\.
+
+3. **Disclaimer**: The author is not responsible for any equipment damage, data loss, safety risks or economic losses caused by the use of this software, including but not limited to experimental teaching, engineering development and commercial application scenarios\.
+
+## 10\.4 Open Source Supplement Specification
+
+This project is based on multiple open\-source ecological projects for secondary development, including but not limited to Rockchip RK3588 official software ecosystem, LeRobot robotic arm control framework, sherpa\-onnx offline speech toolkit, FFmpeg hardware acceleration module, and Intel RealSense SDK\. All referenced open\-source modules comply with their corresponding open\-source license specifications\. Users shall abide by the open\-source agreements of the original referenced projects when conducting secondary development\.
