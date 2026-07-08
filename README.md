@@ -464,4 +464,3 @@ Provide a lightweight, fully offline local experimental platform for embodied in
 
 2. Open Source Community Acknowledgement: The project draws technical inspiration and relies on multiple open\-source ecological projects, including Rockchip RK3588 official software ecosystem, LeRobot robotic arm control framework, sherpa\-onnx offline speech toolkit, FFmpeg Rockchip hardware acceleration module, Intel RealSense depth camera open\-source SDK\.
 
-> （注：部分内容可能由 AI 生成）
