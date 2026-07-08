@@ -2,18 +2,6 @@
 
 # Summary Document of RK3588\-Based Edge\-Side Embodied Intelligent Actuator
 
-## Document Information
-
-- Project Repository: [https://github\.com/zizhennini/RK3588\-Based\-Edge\-Side\-Embodied\-Intelligent\-Actuator](https://github.com/zizhennini/RK3588-Based-Edge-Side-Embodied-Intelligent-Actuator)
-
-- Developer: zizhennini
-
-- Main Programming Language: Python \(99\.4%\), Shell Script \(0\.6%\)
-
-- Document Type: Complete Project Summary Document
-
-- Applicable Scenarios: Academic Report, Project Introduction, Opening Report, Technical Document
-
 # 1\. Detailed Project Introduction
 
 ## 1\.1 Project Background
@@ -476,7 +464,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ## 10\.2 Copyright Statement
 
-Copyright \(c\) 2025 zizhennini
+Copyright \(c\) 2026 zizhennini
 
 ## 10\.3 License Description \& Usage Rules
 
