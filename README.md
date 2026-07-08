@@ -102,7 +102,7 @@ flowchart LR
 
 | Module | Recommended Device |
 |---|---|
-| Edge computing board | RK3588 development board, 16 GB RAM recommended |
+| Edge computing board | RK3588 development board, 8 GB RAM recommended |
 | Robotic arm | SO-ARM101 6-DOF robotic arm |
 | Servo | Feetech STS3215 or compatible serial servo |
 | Camera | Intel RealSense D435i RGB-D camera |
