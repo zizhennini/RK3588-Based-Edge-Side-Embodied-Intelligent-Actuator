@@ -62,7 +62,7 @@ The whole system operates completely offline without any dependence on cloud ser
 |Execution Manipulator|SO\-ARM101 6\-DOF Robotic Arm|Complete six\-joint rotation movement, equipped with clamping gripper for grasping and placing|
 |Drive Servo|Feetech STS3215 Serial Bus Servo|Control each joint rotation, support real\-time feedback of pulse value, joint angle and operating current|
 |Perception Camera|Intel RealSense D435i RGB\-D Depth Camera|Synchronously output RGB color image \+ depth spatial data, realize target 3D coordinate positioning|
-|Audio Input Device|USB Microphone|Collect voice commands for offline ASR recognition and keyword wake\-up|
+|Audio Input Device| Microphone|Collect voice commands for offline ASR recognition and keyword wake\-up|
 |Audio Output Device|Speaker / USB Audio Adapter|Play voice feedback synthesized by TTS module|
 |Communication Accessories|USB / TTL Serial Adapter|Realize serial communication between mainboard and servo bus of robotic arm|
 
