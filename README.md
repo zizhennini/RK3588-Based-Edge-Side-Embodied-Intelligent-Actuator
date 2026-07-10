@@ -446,12 +446,6 @@ Provide a lightweight, fully offline local experimental platform for embodied in
 
 4. Research on depth vision target positioning and autonomous grasping strategy of desktop small objects\.
 
-## 9\.3 Open Source License \& Acknowledgement
-
-1. Open Source License Description: There is no built\-in LICENSE file in the original warehouse\. If users need to carry out secondary development, modification and public distribution, they must add a standard open\-source license file \(MIT/Apache 2\.0 etc\.\) by themselves\.
-
-2. Open Source Community Acknowledgement: The project draws technical inspiration and relies on multiple open\-source ecological projects, including Rockchip RK3588 official software ecosystem, LeRobot robotic arm control framework, sherpa\-onnx offline speech toolkit, FFmpeg Rockchip hardware acceleration module, Intel RealSense depth camera open\-source SDK\.
-
 # 10\. Open Source License \(MIT License\)
 
 ## 10\.1 Full License Text
