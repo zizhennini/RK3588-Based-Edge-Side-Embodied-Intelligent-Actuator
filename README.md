@@ -475,7 +475,3 @@ This project adopts the open\-source MIT License, which is a permissive free sof
 2. **Mandatory Obligations**: Retain the original copyright and license statement of the project in the code repository, document description and derivative works of any secondary development and distribution\.
 
 3. **Disclaimer**: The author is not responsible for any equipment damage, data loss, safety risks or economic losses caused by the use of this software, including but not limited to experimental teaching, engineering development and commercial application scenarios\.
-
-## 10\.4 Open Source Supplement Specification
-
-This project is based on multiple open\-source ecological projects for secondary development, including but not limited to Rockchip RK3588 official software ecosystem, LeRobot robotic arm control framework, sherpa\-onnx offline speech toolkit, FFmpeg hardware acceleration module, and Intel RealSense SDK\. All referenced open\-source modules comply with their corresponding open\-source license specifications\. Users shall abide by the open\-source agreements of the original referenced projects when conducting secondary development\.
