@@ -1,0 +1,8 @@
+{
+    "1": {"homing_offset": 2048, "range_min": 946, "range_max": 3287, "drive_mode": 0},
+    "2": {"homing_offset": 2048, "range_min": 821, "range_max": 3206, "drive_mode": 0},
+    "3": {"homing_offset": 2048, "range_min": 888, "range_max": 3105, "drive_mode": 0},
+    "4": {"homing_offset": 2048, "range_min": 851, "range_max": 3192, "drive_mode": 0},
+    "5": {"homing_offset": 2048, "range_min": 130, "range_max": 3985, "drive_mode": 0},
+    "6": {"homing_offset": 1781, "range_min": 1495, "range_max": 2860, "drive_mode": 0}
+}
