@@ -1,8 +1,15 @@
-"""抓取管线 -- VLM 定位 + GGCNN/PCA 抓取 + IK 执行
+"""抓取管线 -- ACT 连续控制 / VLM+GGCNN 三段式 双模式
 
-整合完整感知-规划-执行三段管线，实现 PolicyModule 接口。
+整合完整感知-规划-执行管线，实现 PolicyModule 接口。
 
-降级路径:
+模式切换 (self.use_act):
+  ACT 模式（优先）:
+    ACTPolicy 输出 action chunk，外层 50Hz 循环逐步执行 write_positions，
+    直到 chunk 耗尽 / 夹爪闭合 / 超时 / 达到最大步数。
+  GGCNN 模式（兜底）:
+    VLM 定位 ROI + GGCNN 抓取检测 -> IK -> 三段式（接近/抓取/抬升）。
+
+GGCNN 模式降级路径:
   1. GGCNN 可用 -> VLM 定位 ROI + GGCNN 抓取检测
   2. 仅 VLM 可用 -> bbox 中心 + 简单深度提取（无抓取角度）
   3. 都不可用 -> 返回失败
@@ -43,15 +50,17 @@ class GraspCandidate:
 # 抓取管线
 # ---------------------------------------------------------------------------
 class GraspPipeline(PolicyModule):
-    """完整抓取管线: VLM定位 -> 深度3D -> GGCNN/PCA抓取 -> IK -> 执行
+    """完整抓取管线: ACT 连续控制 或 VLM+GGCNN 三段式
 
     实现 PolicyModule 接口，同时提供更直观的 execute_grasp() 主入口。
+    通过 use_act 属性在两种模式间运行时切换：ACT 不可用时自动降级到 GGCNN。
 
     依赖模块（均通过构造函数注入，可为 None 以支持降级）：
         - arm: SO101Arm (硬件层，必需)
         - camera: CameraManager (硬件层，必需)
         - vlm: VLMPerception (感知层，可选)
         - ggcnn: GGCNNDetector (感知层，可选)
+        - act_policy: ACTPolicy (策略层，可选，启用后优先走 ACT)
         - kinematics: Kinematics (策略层，可选)
     """
 
@@ -84,22 +93,33 @@ class GraspPipeline(PolicyModule):
     T_CLOSE_GRIPPER = 0.5       # 闭合夹爪后等待
     T_LIFT = 0.5                # 抬升后等待
 
-    def __init__(self, arm, camera, vlm=None, ggcnn=None, kinematics=None):
+    # ---- ACT 连续控制参数 ----
+    ACT_CONTROL_HZ = 50.0       # ACT 控制频率 (与 ACTPolicy.predict 输出 execution_time=0.02 对齐)
+    ACT_TIMEOUT_S = 30.0        # 单次抓取最长执行时间 (秒)
+    ACT_MAX_STEPS = 600         # 单次抓取最大步数 (50Hz * 12s, 覆盖多 chunk 续推)
+    ACT_GRIPPER_CLOSE_TH = 0.2  # 夹爪闭合判定阈值 ([0,1] 归一化空间)
+    ACT_GRIPPER_HOLD_STEPS = 5  # 连续多少步夹爪低于阈值才认定抓取完成
+
+    def __init__(self, arm, camera, vlm=None, ggcnn=None,
+                 act_policy=None, kinematics=None):
         """
         Args:
             arm: SO101Arm 实例（必需，提供 move_to/gripper/home/emergency_stop）
             camera: CameraManager 实例（必需，提供 get_frame）
             vlm: VLMPerception 实例（可选，用于目标定位）
             ggcnn: GGCNNDetector 实例（可选，用于抓取位姿检测）
+            act_policy: ACTPolicy 实例（可选，启用 ACT 连续控制模式）
             kinematics: Kinematics 实例（可选，用于额外的工作空间钳制）
         """
         self.arm = arm
         self.camera = camera
         self.vlm = vlm
         self.ggcnn = ggcnn
+        self.act_policy = act_policy
         self.kinematics = kinematics
         self._config: dict = {}
         self._last_grasp: Optional[GraspCandidate] = None
+        self._use_act: bool = False  # ACT 模式开关（运行时可切换）
 
     # ------------------------------------------------------------------
     # Module 生命周期接口
@@ -114,6 +134,10 @@ class GraspPipeline(PolicyModule):
                 lift_offset: float      抬升距离(米)
                 gripper_factor: float   夹爪开度系数
                 workspace: list         工作空间 [xmin,xmax,ymin,ymax,zmin,zmax]
+                use_act: bool           是否默认启用 ACT 模式
+                act_control_hz: float   ACT 控制频率 (默认 50)
+                act_timeout_s: float    ACT 单次抓取超时 (默认 30s)
+                act_max_steps: int      ACT 单次抓取最大步数 (默认 600)
         """
         self._config = dict(config or {})
 
@@ -127,25 +151,65 @@ class GraspPipeline(PolicyModule):
             self.GRIPPER_FACTOR = float(self._config["gripper_factor"])
         if "workspace" in self._config:
             self.WORKSPACE = list(self._config["workspace"])
+        if "act_control_hz" in self._config:
+            self.ACT_CONTROL_HZ = float(self._config["act_control_hz"])
+        if "act_timeout_s" in self._config:
+            self.ACT_TIMEOUT_S = float(self._config["act_timeout_s"])
+        if "act_max_steps" in self._config:
+            self.ACT_MAX_STEPS = int(self._config["act_max_steps"])
+        if "use_act" in self._config:
+            self._use_act = bool(self._config["use_act"])
 
         logger.info(
-            "GraspPipeline 配置完成: cam_angle=%.1f° pre=%.2fm lift=%.2fm",
-            math.degrees(self.CAM_ANGLE), self.PRE_GRASP_OFFSET, self.LIFT_OFFSET,
+            "GraspPipeline 配置完成: cam_angle=%.1f° pre=%.2fm lift=%.2fm use_act=%s",
+            math.degrees(self.CAM_ANGLE), self.PRE_GRASP_OFFSET,
+            self.LIFT_OFFSET, self._use_act,
         )
 
     def start(self) -> None:
         """启动管线（无独立后台线程，占位实现）"""
-        logger.info("GraspPipeline 已启动")
+        logger.info("GraspPipeline 已启动 (mode=%s)",
+                    "ACT" if self.use_act else "GGCNN")
 
     def stop(self) -> None:
         """停止管线（释放引用，占位实现）"""
         self._last_grasp = None
+        # 清理 ACT 动作缓冲区，避免遗留动作被下一任务误用
+        if self.act_policy is not None:
+            try:
+                self.act_policy.reset_buffer()
+            except Exception as e:
+                logger.warning("ACTPolicy.reset_buffer 失败: %s", e)
         logger.info("GraspPipeline 已停止")
 
     @property
     def is_available(self) -> bool:
         """管线可用的最低要求: 机械臂 + 相机"""
         return self.arm is not None and self.camera is not None
+
+    @property
+    def use_act(self) -> bool:
+        """是否使用 ACT 策略模式（ACT 模型不可用时自动降级为 False）"""
+        return (self._use_act
+                and self.act_policy is not None
+                and self.act_policy.is_available)
+
+    @use_act.setter
+    def use_act(self, value: bool) -> None:
+        """运行时切换抓取模式。
+
+        设为 True 但 ACTPolicy 不可用时会在 use_act getter 中自动降级。
+        切换时清空 ACT 动作缓冲，避免遗留动作。
+        """
+        new_val = bool(value)
+        if new_val != self._use_act and self.act_policy is not None:
+            try:
+                self.act_policy.reset_buffer()
+            except Exception as e:
+                logger.warning("ACTPolicy.reset_buffer 失败: %s", e)
+        self._use_act = new_val
+        logger.info("GraspPipeline 模式切换 -> %s",
+                    "ACT" if self.use_act else "GGCNN")
 
     def on_failure(self) -> str:
         """抓取失败时中止当前任务（避免危险动作）"""
@@ -155,22 +219,37 @@ class GraspPipeline(PolicyModule):
     # PolicyModule 接口: predict
     # ------------------------------------------------------------------
     def predict(self, obs: Observation) -> Action:
-        """PolicyModule 接口: 根据观测返回下一步动作
+        """PolicyModule 接口: ACT 模式优先，否则走 GGCNN 单步。
 
-        说明: 抓取管线本质是"感知-规划-执行"的离散流程，而非连续控制策略。
-        此处为兼容 PolicyModule 接口提供适配实现：基于当前观测计算 IK 目标，
-        返回单步动作。实际完整抓取请使用 execute_grasp()。
+        - ACT 模式: 委托给 ACTPolicy.predict，返回单步动作（内部 chunk buffer 管理）。
+        - GGCNN 模式: 基于深度图中心点 + IK 的单步动作（适配 PolicyModule 接口，
+          完整抓取请使用 execute_grasp）。
 
         Args:
             obs: 当前观测（含 rgb/depth/state/timestamp）
 
         Returns:
-            Action: positions=IK 解算的 6 维关节角, gripper=开合度, execution_time
+            Action: positions=6 维关节角, gripper=开合度, execution_time
         """
         if not self.is_available:
             return self._idle_action(obs)
 
-        # 使用深度图中心点作为简易目标（无 VLM/GGCNN 时的兜底策略）
+        if self.use_act:
+            try:
+                return self.act_policy.predict(obs)
+            except Exception as e:
+                logger.error("ACT predict 失败，降级为 GGCNN 单步: %s", e)
+                # 降级: 走 GGCNN 单步逻辑
+
+        return self._ggcnn_single_step(obs)
+
+    def _ggcnn_single_step(self, obs: Observation) -> Action:
+        """GGCNN 模式单步适配: 以深度图中心为目标 -> IK -> 单步动作。
+
+        仅作 PolicyModule 接口兼容使用，完整抓取走 execute_grasp。
+        """
+        if obs.depth is None:
+            return self._idle_action(obs)
         depth = obs.depth
         h, w = depth.shape[:2]
         cu, cv = w // 2, h // 2
@@ -196,16 +275,11 @@ class GraspPipeline(PolicyModule):
     # 主入口: 完整抓取流程
     # ------------------------------------------------------------------
     def execute_grasp(self, target_desc: str, verify: bool = False) -> TaskResult:
-        """完整抓取流程（主入口）
-
-        流程:
-            1. perceive: 获取图像 + VLM 定位 + GGCNN 抓取检测
-            2. plan:     像素->3D + 坐标变换 + 轨迹生成 + 安全校验
-            3. execute:  pre_grasp -> grasp -> close gripper -> lift -> home
+        """完整抓取主入口: ACT 模式走连续控制，GGCNN 模式走三段式。
 
         Args:
             target_desc: 目标描述 (如 "红色杯子")
-            verify: 是否需要人工确认 (默认 False)
+            verify: 是否需要人工确认 (仅 GGCNN 模式生效)
 
         Returns:
             TaskResult(success, message, data)
@@ -213,8 +287,158 @@ class GraspPipeline(PolicyModule):
         if not self.is_available:
             return TaskResult(False, "管线不可用: 缺少机械臂或相机", {})
 
+        if self.use_act:
+            return self._execute_act_grasp(target_desc)
+        return self._execute_ggcnn_grasp(target_desc, verify=verify)
+
+    # ------------------------------------------------------------------
+    # ACT 连续控制抓取
+    # ------------------------------------------------------------------
+    def _execute_act_grasp(self, target_desc: str) -> TaskResult:
+        """ACT 策略驱动的连续控制抓取。
+
+        循环流程 (50Hz):
+            get_frame -> build Observation -> ACTPolicy.predict -> arm.write_positions
+
+        终止条件（任一命中）:
+            1. 超时 ACT_TIMEOUT_S (默认 30s)
+            2. 达到最大步数 ACT_MAX_STEPS (默认 600 步 = 12s)
+            3. 夹爪连续 ACT_GRIPPER_HOLD_STEPS 步低于阈值 → 认定已夹紧
+            4. 相机/机械臂异常 → emergency_stop 后返回失败
+        """
+        if self.act_policy is None or not self.act_policy.is_available:
+            return TaskResult(False, "ACT 模式不可用: ACTPolicy 未加载", {})
+
+        logger.info("[ACT] 启动连续控制抓取: target='%s' hz=%.0f timeout=%.1fs",
+                    target_desc, self.ACT_CONTROL_HZ, self.ACT_TIMEOUT_S)
+
+        # 清理上一任务遗留的 chunk
+        try:
+            self.act_policy.reset_buffer()
+        except Exception as e:
+            logger.warning("ACT reset_buffer 异常: %s", e)
+
+        period = 1.0 / max(self.ACT_CONTROL_HZ, 1.0)
+        t_start = time.perf_counter()
+        n_steps = 0
+        gripper_low_count = 0
+        last_gripper = 1.0
+        terminated_reason = "max_steps"
+
+        try:
+            while self._running_check():
+                step_t0 = time.perf_counter()
+
+                # 超时保护
+                elapsed = step_t0 - t_start
+                if elapsed > self.ACT_TIMEOUT_S:
+                    terminated_reason = "timeout"
+                    logger.warning("[ACT] 超时 %.1fs，中止抓取", elapsed)
+                    break
+                if n_steps >= self.ACT_MAX_STEPS:
+                    terminated_reason = "max_steps"
+                    logger.info("[ACT] 达到最大步数 %d，结束", n_steps)
+                    break
+
+                # 1. 获取观测
+                frame = self.camera.get_frame()
+                if frame is None:
+                    terminated_reason = "camera_lost"
+                    logger.error("[ACT] 相机无可用帧，中止")
+                    break
+                rgb, depth, ts = frame
+                state = self._read_arm_state()
+                obs = Observation(rgb=rgb, depth=depth, state=state, timestamp=ts)
+
+                # 2. ACT 推理 (内部 buffer 耗尽时自动重填)
+                action = self.act_policy.predict(obs)
+                positions = np.asarray(action.positions, dtype=np.float32).reshape(-1)
+                if positions.size < 6:
+                    positions = np.pad(positions, (0, 6 - positions.size))
+                positions = positions[:6]
+
+                # 3. 写入机械臂 (6 维包含夹爪)
+                self.arm.write_positions(positions)
+
+                last_gripper = float(action.gripper)
+                n_steps += 1
+
+                # 4. 夹爪闭合检测: 连续 N 步低于阈值认为已夹紧
+                if last_gripper < self.ACT_GRIPPER_CLOSE_TH:
+                    gripper_low_count += 1
+                    if gripper_low_count >= self.ACT_GRIPPER_HOLD_STEPS:
+                        terminated_reason = "gripper_closed"
+                        logger.info("[ACT] 夹爪连续 %d 步闭合 (gripper=%.2f)，认定抓取完成",
+                                    gripper_low_count, last_gripper)
+                        break
+                else:
+                    gripper_low_count = 0
+
+                # 5. 频率控制
+                dt = time.perf_counter() - step_t0
+                sleep_s = period - dt
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
+
+            duration = time.perf_counter() - t_start
+            logger.info("[ACT] 抓取循环结束: steps=%d duration=%.2fs reason=%s "
+                        "last_infer=%.1fms",
+                        n_steps, duration, terminated_reason,
+                        self.act_policy.last_infer_ms)
+
+            success = terminated_reason in ("gripper_closed", "max_steps")
+            return TaskResult(
+                success=success,
+                message=("ACT 抓取完成" if success
+                         else f"ACT 抓取中止: {terminated_reason}"),
+                data={
+                    "mode": "act",
+                    "target": target_desc,
+                    "steps": n_steps,
+                    "duration_s": round(duration, 3),
+                    "reason": terminated_reason,
+                    "last_gripper": round(last_gripper, 3),
+                    "last_infer_ms": round(self.act_policy.last_infer_ms, 1),
+                },
+            )
+
+        except Exception as e:
+            logger.error("[ACT] 抓取执行异常: %s", e, exc_info=True)
+            try:
+                self.arm.emergency_stop()
+            except Exception as stop_err:
+                logger.error("[ACT] 急停失败: %s", stop_err)
+            return TaskResult(False, f"ACT 执行失败: {e}",
+                              {"mode": "act", "steps": n_steps})
+
+        finally:
+            # 清理未执行完的 chunk，避免污染下次任务
+            try:
+                self.act_policy.reset_buffer()
+            except Exception:
+                pass
+
+    def _running_check(self) -> bool:
+        """ACT 循环运行控制。预留中断 hook（子类可重写接入外部停止事件）。
+
+        默认返回 True，依靠超时/最大步数/夹爪闭合退出循环。
+        """
+        return True
+
+    # ------------------------------------------------------------------
+    # GGCNN 三段式抓取（原 execute_grasp 主体）
+    # ------------------------------------------------------------------
+    def _execute_ggcnn_grasp(self, target_desc: str,
+                             verify: bool = False) -> TaskResult:
+        """GGCNN 模式完整抓取流程。
+
+        流程:
+            1. perceive: 获取图像 + VLM 定位 + GGCNN 抓取检测
+            2. plan:     像素->3D + 坐标变换 + 轨迹生成 + 安全校验
+            3. execute:  pre_grasp -> grasp -> close gripper -> lift -> home
+        """
         # ---- 阶段 1: 感知 ----
-        logger.info("[1/3] 感知阶段: 目标='%s'", target_desc)
+        logger.info("[GGCNN 1/3] 感知阶段: 目标='%s'", target_desc)
         grasp = self._perceive(target_desc)
         if grasp is None:
             return TaskResult(False, "感知失败: 未定位到可抓取目标", {})
@@ -227,7 +451,7 @@ class GraspPipeline(PolicyModule):
         )
 
         # ---- 阶段 2: 规划 ----
-        logger.info("[2/3] 规划阶段")
+        logger.info("[GGCNN 2/3] 规划阶段")
         trajectory = self._plan(grasp)
         if trajectory is None:
             return TaskResult(
@@ -243,7 +467,7 @@ class GraspPipeline(PolicyModule):
                 return TaskResult(False, "用户取消执行", {})
 
         # ---- 阶段 3: 执行 ----
-        logger.info("[3/3] 执行阶段")
+        logger.info("[GGCNN 3/3] 执行阶段")
         return self._execute(trajectory, grasp.angle_rad, grasp.width_m)
 
     # ------------------------------------------------------------------
