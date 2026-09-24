@@ -33,11 +33,6 @@ VLM_MEMORY_BUDGET_MB = 900     # VLM 推理预估内存占用
 RECORDING_MEMORY_BUDGET_MB = 256  # 录像编码预估内存占用
 MEMORY_RESERVE_MB = 200         # 系统预留内存余量
 
-# ── MobileNet SSD 配置 ──
-SSD_PROTOTXT = "./models/MobileNetSSD/MobileNetSSD_deploy.prototxt"
-SSD_CAFFEMODEL = "./models/MobileNetSSD/MobileNetSSD_deploy.caffemodel"
-SSD_CONFIDENCE = 0.5
-
 # ── 子进程运行时配置 (refactor_plan_v9 §1.6 / §4.1) ──
 # True 时相机/ACT/GGCNN 的 CPU 推理走独立子进程 + 共享内存帧传输 (runtime/)，
 # 规避 Python GIL 抖动、适配 RK3588 NPU 单进程单核限制；

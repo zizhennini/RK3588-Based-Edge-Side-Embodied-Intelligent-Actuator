@@ -16,6 +16,14 @@
   - `worker.py`: `SubprocessWorker`（spawn + 命令/响应 Queue + 子进程内重新绑核）+ `InferenceWorker`（ACT/GGCNN 推理子进程，模型子进程内构建）
 - `config/settings.py`: `USE_SUBPROCESS_RUNTIME`、`CORES_*` 各子进程绑核表（§4.1 资源分配集中定义）、`SHARED_FRAME_NAME`
 
+### 清理（无用文件 / 死代码链）
+- 删除 `vla/vision/detector.py`（MobileNetSSD）— 模型文件已于 v0.3.0 删除，运行时必崩；`vla/vision/__init__.py` 同步移除导出，README 重写（完成 v0.3.0 待办"清理遗留代码引用"）
+- 删除 `scripts/test_pipeline.py` — 以 MobileNetSSD 为核心的遗留三联测试，随模型删除已不可运行
+- 删除 `scripts/download_mobilenet.py` / `scripts/download_smolvlm2.py` — 下载 v0.3.0 已清理模型的失效脚本
+- 删除 `config/settings.py` 中 `SSD_PROTOTXT/SSD_CAFFEMODEL/SSD_CONFIDENCE` 死配置（无任何消费方）
+- 本地清理: 空遗留文件 `test_output.txt`、各目录 `__pycache__/`（均未跟踪）
+- 保留决策: `camera/`、`vla/`（除 detector）、`voice_assistant/` 仍被约 20 个脚本及 `voice/orchestrator.py` 引用，暂不删除；`lerobot/`（85 文件 vendored 子集）为遥操作/录制脚本依赖（`pip install -e` 后被 `calib_teleop.py`/`teleop_record.py` 引用），第三阶段数据录制可能复用，暂不删除
+
 ### 文档
 - `docs/architecture.md`: 全面修订 — [已落地]/[规划中] 标注、并发模型对照表、配置单一源说明、架构债清理记录
 - `docs/refactor_plan_v9.md`: 开发日志追加 v9.1 + 债处置表 + 遗留项
@@ -83,7 +91,7 @@
 ### 待办
 - [ ] 下载 GGCNN Cornell 预训练权重并导出 ONNX
 - [ ] 板端部署验证（chmod +x demo imgenc）
-- [ ] 清理遗留代码引用（vla/vision/detector.py 引用已删除的 MobileNetSSD）
+- [x] 清理遗留代码引用（vla/vision/detector.py 引用已删除的 MobileNetSSD）— 已于 v0.5.0 完成
 
 ## v0.2.0 - 2026-09-23 (架构重构第一阶段)
 

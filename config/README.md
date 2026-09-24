@@ -55,13 +55,6 @@
 | `RECORDING_MEMORY_BUDGET_MB` | int | 录像编码预估内存占用（256） |
 | `MEMORY_RESERVE_MB` | int | 系统预留内存余量（200） |
 
-### MobileNet SSD
-
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `SSD_PROTOTXT` / `SSD_CAFFEMODEL` | str | 模型文件路径 |
-| `SSD_CONFIDENCE` | float | 检测置信度阈值（0.5） |
-
 ### 子进程运行时 (refactor_plan_v9 §1.6/§4.1, v0.5.0 新增)
 
 | 参数 | 类型 | 说明 |
