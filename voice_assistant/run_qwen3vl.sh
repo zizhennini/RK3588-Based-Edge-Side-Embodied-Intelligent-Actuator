@@ -29,7 +29,7 @@ fi
 echo "Using image: $LATEST_IMAGE"
 
 exec ./demo "$LATEST_IMAGE" \
-  ./qwen3-vl-2b_vision_rk3588.rknn \
-  ./qwen3-vl-2b-instruct_w8a8_rk3588.rkllm \
+  ./Qwen3.5-0.8B_vision_rk3588.rknn \
+  ./Qwen3.5-0.8B_w8a8_rk3588.rkllm \
   2048 4096 3 \
   "<|vision_start|>" "<|vision_end|>" "<|image_pad|>"

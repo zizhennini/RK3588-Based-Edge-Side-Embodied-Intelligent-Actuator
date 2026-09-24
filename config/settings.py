@@ -22,8 +22,8 @@ SERIAL_BAUD = 1000000
 
 # ── VLM 配置 ──
 VLM_MODEL_NAME = "qwen3.5"
-VLM_MODEL_PATH = "./models/Qwen3.5-0.8B"
-VLM_DEMO_BIN = "./models/Qwen3.5-0.8B/demo"
+VLM_MODEL_PATH = "./models/vlm/Qwen3.5-0.8B"
+VLM_DEMO_BIN = "./models/vlm/Qwen3.5-0.8B/demo"
 
 # ── 内存管理配置 ──
 VLM_IDLE_UNLOAD_TIMEOUT = 30  # VLM 闲置秒数后自动卸载

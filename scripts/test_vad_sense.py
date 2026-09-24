@@ -5,9 +5,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import sherpa_onnx
 
-VAD_MODEL = "/home/elf/work/RK3588-EIA/voice_assistant/models/silero_vad/silero_vad.onnx"
-SV_MODEL = "/home/elf/work/RK3588-EIA/voice_assistant/models/sense-voice/model.int8.onnx"
-SV_TOKENS = "/home/elf/work/RK3588-EIA/voice_assistant/models/sense-voice/tokens.txt"
+VAD_MODEL = "/home/elf/work/rk3588-eia/voice_assistant/models/silero_vad/silero_vad.onnx"
+SV_MODEL = "/home/elf/work/rk3588-eia/voice_assistant/models/sense-voice/model.int8.onnx"
+SV_TOKENS = "/home/elf/work/rk3588-eia/voice_assistant/models/sense-voice/tokens.txt"
 MIC_DEVICE = "hw:rockchipnau8822,0"
 SAMPLE_RATE = 16000
 CHANNELS = 1

@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from config.settings import CAMERA_OVERHEAD
 from voice_assistant.voice_assistant.qwen_runner import QwenRunner
 
-OUT = "/home/elf/work/RK3588-EIA/scripts/test_grounding_output"
+OUT = "/home/elf/work/rk3588-eia/scripts/test_grounding_output"
 os.makedirs(OUT, exist_ok=True)
 
 print("拍照（上帝视角）...")

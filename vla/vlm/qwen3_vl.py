@@ -4,7 +4,7 @@ import os
 import subprocess
 from .base import VLMBase, VLMResult
 
-MD = "/home/elf/work/RK3588-EIA/models/Qwen3.5-0.8B"
+MD = "/home/elf/work/rk3588-eia/models/vlm/Qwen3.5-0.8B"
 
 
 # 颜色关键词表（用于从中文文本中提取颜色）

@@ -27,11 +27,15 @@ voice_assistant/voice_assistant/models/
 # 运行时库
 scripts/demo/
 rknn-llm-release-v1.2.3/
-models/Qwen3-VL-2B/
-models/SmolVLM-500M/demo_Linux_aarch64/
 Qwen-Chat-Assistant/
 Qwen-Chat-Assistant.zip
 OrbbecSDK/
+
+# v9 方案模型目录（大文件，全部排除；models/so101_urdf/ 保留跟踪）
+models/vlm/
+models/ggcnn/
+models/act/
+models/speech/
 
 # Python缓存
 __pycache__/
@@ -44,8 +48,6 @@ voice_assistant/voice_assistant/demo.jpg
 
 # 演示二进制
 scripts/scripts/demo/
-models/Qwen3.5-0.8B/
-models/models/Qwen3.5-0.8B/
 
 # 环境与IDE
 .conda/

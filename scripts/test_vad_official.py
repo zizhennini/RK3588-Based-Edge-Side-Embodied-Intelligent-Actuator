@@ -4,9 +4,9 @@ import numpy as np
 import sounddevice as sd
 import sherpa_onnx
 
-VAD = "/home/elf/work/RK3588-EIA/voice_assistant/models/silero_vad/silero_vad.onnx"
-MODEL = "/home/elf/work/RK3588-EIA/voice_assistant/models/sense-voice/model.int8.onnx"
-TOKENS = "/home/elf/work/RK3588-EIA/voice_assistant/models/sense-voice/tokens.txt"
+VAD = "/home/elf/work/rk3588-eia/voice_assistant/models/silero_vad/silero_vad.onnx"
+MODEL = "/home/elf/work/rk3588-eia/voice_assistant/models/sense-voice/model.int8.onnx"
+TOKENS = "/home/elf/work/rk3588-eia/voice_assistant/models/sense-voice/tokens.txt"
 
 
 def main():
