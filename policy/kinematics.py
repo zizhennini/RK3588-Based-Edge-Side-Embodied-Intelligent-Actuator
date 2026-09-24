@@ -130,58 +130,78 @@ class Kinematics:
 
         return j2_deg, j3_deg
 
-    def forward_kinematics(self, angles: np.ndarray) -> np.ndarray:
-        """正运动学：给定 6 维关节角度 (rad)，返回 (x, y, z) 笛卡尔坐标
+    # ------------------------------------------------------------------
+    # 正运动学 (FK) — 与 inverse_kinematics 严格互逆
+    # ------------------------------------------------------------------
+    # 角度向量约定（= IK 输出 = read_positions 舵机弧度）:
+    #   j[1] = θ1_math + THETA1_OFFSET   θ1_math: 上臂仰角（水平向前=0，向上为正）
+    #   j[2] = θ2_math + THETA2_OFFSET   θ2_math: 肘部相对"伸直"的弯折量
+    #                                    （0=完全伸直，π=完全对折）
+    #   前臂绝对仰角 = θ1_math - θ2_math
+    # FK 必须先减去机械偏移还原数学角（refactor_plan_v9 T1.3: FK/IK 偏差 <1mm）
 
-        使用变换矩阵链式计算，与 2D FK (xlerobot_fk) 保持一致。
+    def _elev(self, a: float) -> np.ndarray:
+        """竖直平面旋转 4x4：把 +x 方向抬升到仰角 a"""
+        c, s = math.cos(a), math.sin(a)
+        return np.array([
+            [c, 0.0, -s, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [s, 0.0, c, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ])
+
+    @staticmethod
+    def _trans(x: float, y: float, z: float) -> np.ndarray:
+        T = np.eye(4)
+        T[0, 3], T[1, 3], T[2, 3] = x, y, z
+        return T
+
+    def forward_kinematics_matrix(self, angles: np.ndarray) -> np.ndarray:
+        """正运动学：6 维关节角度 (rad) → 4x4 齐次变换矩阵（基座坐标系）
+
+        位置部分 T[:3, 3] 与 inverse_kinematics 严格互逆。
+        姿态部分含 wrist_flex / wrist_roll 的近似合成（舵机零点基准，
+        URDF rpy 安装细节未逐项标定），仅供可视化与标定数据采集使用；
+        位置列不受姿态近似影响。
         """
-        j = angles
+        j = np.asarray(angles, dtype=float)
+        th1 = j[1] - self.THETA1_OFFSET    # 上臂仰角（数学角）
+        th2 = j[2] - self.THETA2_OFFSET    # 肘部弯折（数学角）
+        j3 = j[3] if len(j) > 3 else 0.0
+        j4 = j[4] if len(j) > 4 else 0.0
 
-        # 去除偏移补偿，得到数学平面角度
-        # 从 IK 关系: theta1 = pi/2 - radians(j2_deg), 且 j2_rad = j[1] + offset
-        theta1 = j[1] + self.THETA1_OFFSET
-        theta2 = j[2] + self.THETA2_OFFSET
-
-        # --- 变换矩阵链 ---
-        # T01: shoulder_pan 绕 Z 轴旋转
+        # T01: shoulder_pan 绕 Z 轴
         c0, s0 = math.cos(j[0]), math.sin(j[0])
         T01 = np.array([
-            [c0, -s0, 0, 0],
-            [s0,  c0, 0, 0],
-            [0,   0,  1, self.BASE_HEIGHT],
-            [0,   0,  0, 1],
+            [c0, -s0, 0.0, 0.0],
+            [s0,  c0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
         ])
 
-        # T12: shoulder_lift 绕 Y 轴旋转（平面内）
-        c1, s1 = math.cos(theta1), math.sin(theta1)
-        T12 = np.array([
-            [c1, 0, s1, 0],
-            [0,  1, 0,  0],
-            [-s1, 0, c1, 0],
-            [0,  0, 0,  1],
+        # wrist_roll 绕工具 x 轴
+        c4, s4 = math.cos(j4), math.sin(j4)
+        Rx4 = np.array([
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, c4, -s4, 0.0],
+            [0.0, s4,  c4, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
         ])
 
-        # T23: elbow_flex 绕 Y 轴旋转 + L1 平移
-        c2, s2 = math.cos(theta2), math.sin(theta2)
-        T23 = np.array([
-            [c2, 0, s2, self.L1],
-            [0,  1, 0,  0],
-            [-s2, 0, c2, 0],
-            [0,  0, 0,  1],
-        ])
+        # 链: 基座旋转 → 基座高度 → 上臂(θ1) → L1 → 前臂(-θ2 相对弯折) → L2 → 腕部
+        T = (T01
+             @ self._trans(0.0, 0.0, self.BASE_HEIGHT)
+             @ self._elev(th1) @ self._trans(self.L1, 0.0, 0.0)
+             @ self._elev(-th2) @ self._trans(self.L2, 0.0, 0.0)
+             @ self._elev(-j3) @ Rx4)
+        return T
 
-        # T34: wrist_flex 绕 Y 轴旋转 + L2 平移
-        c3, s3 = math.cos(j[3]), math.sin(j[3])
-        T34 = np.array([
-            [c3, 0, s3, self.L2],
-            [0,  1, 0,  0],
-            [-s3, 0, c3, 0],
-            [0,  0, 0,  1],
-        ])
+    def forward_kinematics(self, angles: np.ndarray) -> np.ndarray:
+        """正运动学：给定 6 维关节角度 (rad)，返回 (x, y, z) 笛卡尔坐标 (米)
 
-        # 链式乘法
-        T = T01 @ T12 @ T23 @ T34
-        return T[:3, 3]
+        与 inverse_kinematics 严格互逆：FK(IK(p)) == p（偏差 < 1mm）。
+        """
+        return self.forward_kinematics_matrix(angles)[:3, 3]
 
     def clamp_workspace(self, xyz: np.ndarray) -> np.ndarray:
         """工作空间钳制，确保目标在可达范围内

@@ -33,14 +33,17 @@ COLOR_KEYWORDS = [
     "透明", "彩色",
 ]
 
-# ─── 默认路径（板端） ─────────────────────────────────────────────────────────
-_DEFAULT_MODEL_DIR = "/home/elf/work/rk3588-eia/models/vlm/Qwen3.5-0.8B"
+# ─── 项目根目录（自动检测） ──────────────────────────────────────────────────
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# ─── 默认路径（相对项目根目录，支持多环境部署） ─────────────────────────────
+_DEFAULT_MODEL_DIR = str(_PROJECT_ROOT / "models" / "vlm" / "Qwen3.5-0.8B")
 _DEFAULT_DEMO_BIN = "demo"
 _DEFAULT_RKNN_MODEL = "Qwen3.5-0.8B_vision_rk3588.rknn"
 _DEFAULT_RKLLM_MODEL = "Qwen3.5-0.8B_w8a8_rk3588.rkllm"
 
-# 临时图片路径（板端 /tmp）
-_TMP_IMAGE_PATH = "/tmp/vlm_detect_frame.jpg"
+# 临时图片路径（优先使用 /tmp，兜底项目根目录下的 tmp）
+_TMP_IMAGE_PATH = str(_PROJECT_ROOT / "tmp" / "vlm_detect_frame.jpg")
 
 
 class VLMPerception(PerceptionModule):

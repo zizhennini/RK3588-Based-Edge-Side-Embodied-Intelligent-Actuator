@@ -36,8 +36,8 @@
 ### 核心定义
 
 ```python
-BIG_CORES = {0, 1, 2, 3}     # Cortex-A76（大核）
-LITTLE_CORES = {4, 5, 6, 7}   # Cortex-A55（小核）
+LITTLE_CORES = {0, 1, 2, 3}   # Cortex-A55（小核）— 相机/串口/语音/安全监控
+BIG_CORES = {4, 5, 6, 7}      # Cortex-A76（大核）— ACT/GGCNN/VLM 推理
 ```
 
 ## 内存管控 (memory.py)

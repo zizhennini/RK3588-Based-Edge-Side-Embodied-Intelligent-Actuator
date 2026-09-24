@@ -275,10 +275,104 @@ class System:
 
         return True
 
+    # ------------------------------------------------------------------
+    # 语音模块生命周期（可选，缺失时降级）
+    # ------------------------------------------------------------------
+
+    def init_voice(self) -> bool:
+        """初始化语音模块（sherpa-onnx KWS/ASR/TTS + 意图路由）。
+
+        语音为非关键模块：依赖缺失时优雅降级，不影响核心抓取。
+
+        Returns:
+            True 表示 VoiceAssistant 可用并已启动
+        """
+        try:
+            from voice.assistant import VoiceAssistant
+            assistant = VoiceAssistant()
+            assistant.setup({
+                "config_path": self.config.get(
+                    "voice_config_path", "voice/config/default.yaml"),
+                "on_intent": self._handle_voice_intent,
+            })
+            if assistant.is_available:
+                self.voice = assistant
+                self.voice.start()
+                logger.info("VoiceAssistant 已启动")
+                return True
+            logger.info("VoiceAssistant 不可用（依赖缺失）")
+            self.voice = None
+            return False
+        except Exception as e:
+            logger.warning(f"VoiceAssistant 初始化失败: {e}")
+            self.voice = None
+            return False
+
+    def _handle_voice_intent(self, intent: str, params: dict):
+        """语音意图处理回调 -- 连接到 GraspPipeline / arm / vlm"""
+        logger.info(f"语音意图: {intent}, 参数: {params}")
+        params = params or {}
+
+        if intent == "grasp":
+            if self.grasp_pipeline is None:
+                if self.voice:
+                    self.voice.say("抓取功能不可用")
+                return
+            target = params.get("target", "")
+            if self.voice:
+                self.voice.say(f"正在抓取{target}")
+            try:
+                result = self.grasp_pipeline.execute_grasp(target)
+            except Exception as e:
+                logger.error(f"语音触发抓取异常: {e}")
+                if self.voice:
+                    self.voice.say("抓取出现异常")
+                return
+            if self.voice:
+                if result.success:
+                    self.voice.say("抓取成功")
+                else:
+                    self.voice.say(f"抓取失败，{result.message}")
+
+        elif intent == "stop":
+            if self.arm:
+                try:
+                    self.arm.emergency_stop()
+                except Exception as e:
+                    logger.error(f"语音急停失败: {e}")
+            if self.voice:
+                self.voice.say("已急停")
+
+        elif intent == "home":
+            if self.arm:
+                try:
+                    self.arm.home()
+                except Exception as e:
+                    logger.error(f"语音归零失败: {e}")
+            if self.voice:
+                self.voice.say("已归零")
+
+        elif intent == "ask":
+            question = params.get("question", "")
+            logger.info(f"VLM 问答（待实现）: {question}")
+            if self.voice:
+                self.voice.say("我还在思考中")
+
+        else:
+            logger.warning(f"未知语音意图: {intent}")
+
     def shutdown(self):
         """逆序释放所有资源"""
         logger.info("正在关闭系统...")
         self._running = False
+
+        # 语音模块先于安全监控释放
+        if self.voice:
+            try:
+                self.voice.stop()
+            except Exception as e:
+                logger.error(f"VoiceAssistant 关闭失败: {e}")
+            self.voice = None
 
         # 逆序释放: grasp_pipeline -> act/ggcnn/vlm -> safety -> camera -> arm
         if self.grasp_pipeline is not None:
@@ -500,25 +594,43 @@ class System:
             self.shutdown()
 
     def run_voice(self):
-        """语音交互模式 -- 需要 arm + camera + voice"""
+        """语音交互模式 -- 需要 arm + camera + voice
+
+        唤醒词 -> ASR -> 意图路由 -> GraspPipeline / arm，
+        结果通过 TTS 播报。
+        """
         logger.info("语音交互模式启动")
 
-        # 按需初始化: arm + camera（后续增加 voice）
+        # 1. 硬件初始化
         if not self.init_arm():
             logger.critical("语音交互模式: 机械臂不可用")
             return
         self.init_camera()
         self.init_safety()
 
+        # 2. 策略初始化（供“抓取”意图使用，ACT 优先 GGCNN 兑底）
+        self.init_policy()
+
+        # 3. 语音初始化
+        self.init_voice()
+        if not self.voice:
+            logger.error("语音模块不可用，无法进入语音模式")
+            self.shutdown()
+            return
+
+        print("\n[语音交互模式]")
+        print("  唤醒词：“你好同学” / “拍照助手”")
+        print("  示例指令：“抓取红色杯子” / “归零” / “停止”")
+        print("  按 Ctrl+C 退出\n")
+
         self._running = True
-        # TODO: 语音模块迁移后实现
-        logger.warning("语音交互模式尚未完整实现（待语音模块迁移）")
-        while self._running:
-            try:
+        try:
+            while self._running:
                 time.sleep(1.0)
-            except KeyboardInterrupt:
-                break
-        self.shutdown()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.shutdown()
 
     def run_teleop(self):
         """遥操作模式 -- 仅需 arm"""
@@ -540,23 +652,62 @@ class System:
         self.shutdown()
 
     def run_record(self):
-        """数据录制模式 -- 需要 arm + camera"""
+        """数据录制模式 -- 相机必需，机械臂可选
+
+        当前实现 (refactor_plan_v9 §6.3): H264Encoder 硬件录像
+        (ffmpeg + h264_rkmpp, CPU 占用近零)，Ctrl+C 停止并落盘。
+        P2 阶段扩展: 关节状态 + 图像同步的完整数据录制 (HDF5)。
+        """
         logger.info("数据录制模式启动")
 
-        # 按需初始化: arm + camera
+        # 按需初始化: 相机必需；机械臂失败仅降级（只录视频）
         if not self.init_arm():
-            logger.critical("数据录制模式: 机械臂不可用")
+            logger.warning("数据录制模式: 机械臂不可用，仅录制视频")
+        if not self.init_camera():
+            logger.critical("数据录制模式: 相机不可用")
             return
-        self.init_camera()
+
+        # 硬件编码器（不可用时按 on_failure="skip" 跳过，不拖垮系统）
+        try:
+            from hardware.encoder import H264Encoder
+            encoder = H264Encoder()
+            encoder.setup({
+                "fps": self.config.get("record_fps", 15),
+                "bitrate": self.config.get("record_bitrate", "5M"),
+                "out_dir": self.config.get("record_dir", "./recordings"),
+            })
+        except Exception as e:
+            logger.critical("H264Encoder 加载失败: %s", e)
+            return
+        if not encoder.is_available:
+            logger.critical("H264Encoder 不可用（缺少 ffmpeg 或 H.264 编码器）")
+            return
+
+        out = encoder.open(
+            width=self.config["camera_width"],
+            height=self.config["camera_height"],
+        )
+        if out is None:
+            logger.critical("录像启动失败")
+            return
+        logger.info("录像中: %s （Ctrl+C 停止）", out)
 
         self._running = True
-        # TODO: 数据录制实现（P2 阶段）
-        logger.warning("数据录制模式尚未完整实现（P2 阶段）")
-        while self._running:
-            try:
-                time.sleep(1.0)
-            except KeyboardInterrupt:
-                break
+        fps = self.config.get("record_fps", 15)
+        interval = 1.0 / fps
+        try:
+            while self._running:
+                t0 = time.time()
+                rgb = self.camera.get_rgb()
+                if rgb is not None:
+                    encoder.write_frame(rgb)
+                dt = time.time() - t0
+                if dt < interval:
+                    time.sleep(interval - dt)
+        except KeyboardInterrupt:
+            logger.info("收到 Ctrl+C，停止录像")
+        finally:
+            encoder.close()
         self.shutdown()
 
     # ------------------------------------------------------------------

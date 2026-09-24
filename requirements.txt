@@ -1,10 +1,18 @@
+# =====================================================================
+# RK3588-EIA 板端依赖（RK3588, Python 3.10）
+# 对齐 refactor_plan_v9 §6.1；另保留项目实际使用的
+# pyserial (hardware/arm.py) / sherpa-onnx (voice/) / pyyaml (voice/config)
+# 安装: pip3 install -r requirements.txt
+# =====================================================================
 numpy>=1.24,<2.0
-opencv-python>=4.8
-opencv-python-headless>=4.8
+opencv-python>=4.8,<5.0
+onnxruntime>=1.16
+scipy>=1.10
+pyrealsense2>=2.54
+feetech-servo-sdk>=1.10
 pyserial>=3.5
-sherpa-onnx>=1.10
-pexpect>=4.8
+sherpa-onnx>=1.9
 pyyaml>=6.0
+pexpect>=4.8
 pillow>=10.0
-# rknn-toolkit-lite2: RK3588 NPU推理库，需手动安装whl包
-# lerobot: 遥操作与IK，需 pip install -e .[feetech]
+requests>=2.28

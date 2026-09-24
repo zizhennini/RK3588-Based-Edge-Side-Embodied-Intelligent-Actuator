@@ -19,6 +19,8 @@ CAMERA_POSITION = np.array([0.182, -0.129, 0.47], dtype=float)  # [x, y, z] 标�
 # ── 串口配置 ──
 SERIAL_PORT = "/dev/ttyACM0"
 SERIAL_BAUD = 1000000
+# 舵机标定文件路径 (refactor_plan_v9 §6.5)
+SERVO_CALIB = "./config/calibration.json"
 
 # ── VLM 配置 ──
 VLM_MODEL_NAME = "qwen3.5"
