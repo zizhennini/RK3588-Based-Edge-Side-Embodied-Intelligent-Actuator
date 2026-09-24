@@ -1,5 +1,52 @@
 # 开发日志 (CHANGELOG)
 
+## v0.5.0 - 2026-09-24 (架构债清理 + 文档同步)
+
+对应提交 `0e7ed92`。详见 `docs/refactor_plan_v9.md` v9.1 节与 `docs/architecture.md` 架构债清理记录。
+
+### 修复（4 项架构债）
+- **依赖倒置**: `hardware/arm.py` `move_to()` 不再 `from policy.kinematics import Kinematics`，改为依赖注入（`SO101Arm(kinematics=)` / `set_kinematics()`），由组合根 `main.py:init_arm` 注入；硬件层零 policy 导入
+- **配置硬编码**: `arm.py` / `grasp_pipeline.py` 相机内外参不再复制字面量，统一引用 `config.settings.CAMERA_POSITION/CAMERA_MATRIX`（单一事实来源，消除标定回写后的静默漂移）
+- **子进程未落地**: 移除 `main.py` 死导入 `import multiprocessing as mp`；新增 `USE_SUBPROCESS_RUNTIME` opt-in 开关（默认 False 走已验证的进程内路径）
+- **接口未落地**: `SO101Arm` / `CameraManager` 继承 `HardwareModule` 并实现全部接口方法（arm `on_failure="abort"` 硬依赖；camera `on_failure="skip"` 可降级；camera `execute()` 为文档化 no-op）
+
+### 新增
+- `runtime/` 包（refactor_plan_v9 §1.6/§4.1 落地组件）:
+  - `shared_frame.py`: `SharedFrameBuffer` — 基于 `multiprocessing.shared_memory` 的 seqlock 零拷贝跨进程帧传输
+  - `worker.py`: `SubprocessWorker`（spawn + 命令/响应 Queue + 子进程内重新绑核）+ `InferenceWorker`（ACT/GGCNN 推理子进程，模型子进程内构建）
+- `config/settings.py`: `USE_SUBPROCESS_RUNTIME`、`CORES_*` 各子进程绑核表（§4.1 资源分配集中定义）、`SHARED_FRAME_NAME`
+
+### 文档
+- `docs/architecture.md`: 全面修订 — [已落地]/[规划中] 标注、并发模型对照表、配置单一源说明、架构债清理记录
+- `docs/refactor_plan_v9.md`: 开发日志追加 v9.1 + 债处置表 + 遗留项
+- `README.md` §5 代码结构树、`config/README.md`、`tests/README.md`、`docs/deploy_guide.md`、`scripts/README.md` 同步当前架构
+
+### 验证
+- 语法 23/23、本地导入一致性 172/0、运动学 FK/IK 6/6、SharedFrameBuffer 往返 + 跨句柄 attach 自检通过
+- 注: 完整多进程编排（默认启用子进程）需板端实测后开启（T4.2 / 风险 R2）
+
+## v0.4.0 - 2026-09-24 (ACT 策略集成 + 第一阶段架构对齐)
+
+对应提交 `6dc4e5f`（stage3 ACT）+ `eabd747`（stage1 架构对齐）。
+
+### 新增
+- `policy/act_policy.py`: ACTPolicy — ACT 策略 ONNX 推理封装（PolicyModule 接口，action chunk 逐步执行）
+- `tools/export_act_onnx.py`: ACT ONNX 导出脚本（PC 端 LeRobot checkpoint → ONNX，opset 14+，自动验证）
+- `policy/grasp_pipeline.py`: 双模式切换 — ACT（优先，50Hz 连续控制）/ VLM+GGCNN（兜底，三段式），运行时经 `use_act` 切换、ACT 不可用自动降级
+- `hardware/encoder.py`: H264Encoder — ffmpeg + h264_rkmpp 硬件编码封装（Module 接口），`main.py`/`menu.py` 录像链路接入
+- `voice/`: 独立语音包（KWS 唤醒/ASR/TTS/意图/编排器/CLI，自 voice_assistant 迁移重构）
+- `perception/locator.py`: ColorLocator — HSV 颜色定位降级路径
+- `vla/`: 遗留兼容层（controller/command_queue/kinematics，供旧脚本引用，待第三阶段评估移除）
+- `requirements-dev.txt`: PC 端开发依赖（Python 3.12: torch/onnx/LeRobot v0.6.1），与板端 `requirements.txt`（Python 3.10）分离
+
+### 修复
+- `policy/kinematics.py`: FK/IK 严格互逆（修复 FK 双重偏移 Bug，误差 394mm → <1mm）；统一偏移减法约定（θ1 仰角/θ2 相对伸直弯折）
+- `tests/test_kinematics.py`: 扩展至 6 用例（FK/IK 往返、工作空间钳制、不可达点钳制、关节限位）
+
+### 技术决策
+- ACT 延迟预估 70-120ms（RK3588 A76），ONNX 运行时内存 ~280-350MB
+- Python 版本分离: 板端 3.10（仅推理，不装 LeRobot）/ PC 端 3.12（数据集处理与训练）
+
 ## v0.3.0 - 2026-09-24 (第二阶段: GGCNN 通用抓取 + VLM 感知)
 
 ### 新增

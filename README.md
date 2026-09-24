@@ -197,36 +197,58 @@ The project adopts a standardized modular layered code structure, and the wareho
 
 ```Plain Text
 RK3588-Based-Edge-Side-Embodied-Intelligent-Actuator/
-├── main.py                         # Main entry of multimodal vision-motion integration (VLA) program
-├── va.py                           # Voice assistant independent entry, realize voice listening, dialogue and visual QA
-├── menu.py                         # Interactive text menu, convenient for beginners to quickly select functions without memorizing command lines
-├── requirements.txt                # Python dependency list, including all vision, voice, control and encoding libraries
-├── .gitignore                      # Git ignore file, exclude large model files, video cache, device logs
-├── config/                         # Global system configuration folder
-│   ├── settings.py                 # Basic hardware parameters: serial port, camera index, model path, memory allocation
-│   ├── safety.py                   # Safety threshold configuration: joint limit, maximum motion speed, emergency stop parameters
-│   └── teaching.py                # Teaching experiment configuration: default grasping track, camera hand-eye calibration parameters
-├── vla/                            # Core vision-motion integration business module
-│   ├── command_queue.py            # Global FIFO command queue + interrupt processing logic, resolve task conflict
-│   ├── control/                    # Robotic arm underlying control code, servo communication and motion planning
-│   └── vlm/                        # Multimodal model loading, preprocessing and local reasoning encapsulation interface
-├── voice_assistant/                # Full offline voice module: KWS wake-up, ASR recognition, TTS synthesis
-├── camera/                         # RealSense depth camera data reading, image correction, depth coordinate calculation code
-├── lerobot/                        # LeRobot standardized motion control adaptation layer, compatible with mainstream robotic arm control logic
-├── scripts/                        # Independent executable tool scripts for all experimental functions
-│   ├── develop_motion.py           # One-click master-slave teaching track development full workflow script
-│   ├── record_trajectory.py        # Motion library management: record, list, view details, delete track files
-│   ├── smooth_trajectory.py        # Batch automatic filtering, smoothing and safety detection of all tracks in the library
-│   ├── replay_traj.py              # Independent track playback script, support serial port parameter customization
-│   ├── vlm_grasp.py                # VLM vision-guided automatic grasping experimental script, with dry-run simulation parameter
-│   ├── recorder.py                 # Hardware accelerated video recording script, support custom duration and OSD text
-│   └── task_controller.py          # Multi-step composite task controller, realize continuous action combination
-├── motion_library/                 # Persistent storage directory of optimized and verified motion track JSON files
-├── task_library/                   # Composite multi-step task template storage, such as "grasp + move + place" combined actions
-├── recordings/                     # Automatically store all hardware-encoded experiment videos
-├── models/so101_urdf/              # SO-ARM101 robotic arm URDF simulation model, used for track preview and simulation
-├── tests/                          # Unit test script folder: serial communication test, camera test, model reasoning test, servo test
-└── docs/                           # Project official documentation: deployment tutorial, parameter calibration guide, experimental teaching cases
+├── main.py                         # Unified system entry: System class orchestrates hardware/perception/policy, 5 run modes + degradation logic
+├── va.py                           # Voice assistant standalone entry: voice listening, dialogue and visual QA
+├── menu.py                         # Interactive text menu, select functions without memorizing command lines
+├── requirements.txt                # Board-side dependencies (RK3588, Python 3.10: onnxruntime, rknn-toolkit-lite2, pyrealsense2 ...)
+├── requirements-dev.txt            # PC-side dev dependencies (Python 3.12: torch, onnx, LeRobot v0.6.1 for dataset processing & ACT training)
+├── .gitignore                      # Git ignore file: large model files, video cache, device logs
+├── config/                         # Global system configuration (single source of truth)
+│   ├── settings.py                 # Camera intrinsics/extrinsics, serial port, VLM paths, memory budgets, subprocess runtime switches & core binding
+│   ├── safety.py                   # Safety thresholds: joint limits, max motion speed, emergency stop parameters
+│   ├── teaching.py                 # Teaching experiment config: default grasping tracks, hand-eye calibration parameters
+│   ├── cpu_affinity.py             # big.LITTLE core isolation utilities (A55 cores 0-3 / A76 cores 4-7)
+│   ├── memory.py                   # Graded memory monitoring & limiting framework
+│   └── calibration.json            # Servo calibration parameters (6 servos, loaded by SO101Arm)
+├── hardware/                       # Hardware layer (all modules implement HardwareModule/Module interfaces)
+│   ├── interfaces.py               # Core data structures (Observation/Action/TaskRequest/TaskResult) + module lifecycle interfaces
+│   ├── arm.py                      # SO101Arm: scservo_sdk bus servo control, SYNC_READ/WRITE, singleton + serial crash recovery, kinematics injected by composition root
+│   ├── camera_d435i.py             # CameraManager: RealSense D435i capture, deep-copy FrameBuffer, warm-up, core-bound capture thread
+│   ├── safety.py                   # SafetyMonitor: depth-based obstacle avoidance + emergency stop (independent monitor thread)
+│   └── encoder.py                  # H264Encoder: ffmpeg + h264_rkmpp hardware video encoding
+├── policy/                         # Policy layer
+│   ├── kinematics.py               # 6-DOF analytical IK + FK (XLeRobot offset compensation, strict FK/IK inverse consistency < 1mm)
+│   ├── act_policy.py               # ACTPolicy: ACT diffusion policy ONNX inference (action chunk execution)
+│   └── grasp_pipeline.py           # GraspPipeline: dual-mode ACT / VLM+GGCNN three-stage grasping pipeline
+├── perception/                     # Perception layer
+│   ├── vlm.py                      # VLMPerception: Qwen3.5-0.8B via RKLLM subprocess (auto unload after 30s idle)
+│   ├── grasp_detect.py             # GGCNNDetector: real-time grasp pose detection (ONNX Runtime)
+│   └── locator.py                  # ColorLocator: HSV color localization fallback
+├── runtime/                        # Subprocess + shared-memory runtime (opt-in via settings.USE_SUBPROCESS_RUNTIME)
+│   ├── shared_frame.py             # SharedFrameBuffer: seqlock zero-copy cross-process frame transfer
+│   └── worker.py                   # SubprocessWorker / InferenceWorker: spawn subprocess + Queue control + child-side core re-binding
+├── voice/                          # Offline voice stack: KWS wake-up, ASR, TTS, intent, orchestrator, CLI
+├── voice_assistant/                # Legacy voice assistant module (voice models reside under voice_assistant/voice_assistant/models/)
+├── vla/                            # Legacy VLA compatibility layer (controller / command_queue / kinematics, kept for old scripts)
+├── camera/                         # Legacy RealSense helpers (superseded by hardware/camera_d435i.py)
+├── lerobot/                        # LeRobot reference checkout (PC-side dataset/training only, not installed on board)
+├── scripts/                        # Standalone tool scripts: calibration, teleop, recording, grasping experiments
+│   ├── calibrate_camera.py         # Camera intrinsic calibration (--d435i writes back to settings.CAMERA_MATRIX)
+│   ├── calibrate_extrinsics.py     # Camera-to-arm-base extrinsic calibration (writes back to settings.CAMERA_POSITION)
+│   ├── develop_motion.py           # One-click master-slave teaching track development workflow
+│   ├── record_trajectory.py        # Motion library management: record, list, view, delete track files
+│   ├── smooth_trajectory.py        # Batch filtering, smoothing and safety check of tracks
+│   ├── replay_traj.py              # Track playback with customizable serial parameters
+│   ├── vlm_grasp.py                # VLM vision-guided grasping experiment (reference implementation of GraspPipeline)
+│   ├── recorder.py                 # Hardware-accelerated video recording with custom duration and OSD text
+│   └── task_controller.py          # Multi-step composite task controller
+├── tools/                          # Model export utilities: export_act_onnx.py, export_ggcnn_onnx.py (PC-side)
+├── motion_library/                 # Persistent storage of optimized and verified motion track JSON files
+├── task_library/                   # Composite multi-step task templates ("grasp + move + place" combinations)
+├── recordings/                     # Automatically stored hardware-encoded experiment videos
+├── models/                         # Model assets: so101_urdf/ (tracked); vlm/ ggcnn/ act/ speech/ (gitignored, deployed separately)
+├── tests/                          # Unit tests: test_kinematics.py (FK/IK consistency), test_vlm.py
+└── docs/                           # architecture.md, refactor_plan_v9.md, deploy_guide.md, test_plan.md
 ```
 
 # 6\. Step\-by\-Step Complete Deployment \& Quick Operation Guide
@@ -242,12 +264,20 @@ cd RK3588-Based-Edge-Side-Embodied-Intelligent-Actuator
 
 ## 6\.2 Python Independent Environment Construction
 
-Use Conda to build an isolated Python 3\.10 operating environment to avoid dependency conflicts:
+Board side (RK3588): use Conda to build an isolated Python 3\.10 environment (inference only, LeRobot is NOT installed on the board):
 
 ```bash
-conda create -n rk3588-eia python=3.10 -y
-conda activate rk3588-eia
+conda create -n rk3588 python=3.10 -y
+conda activate rk3588
 pip install -r requirements.txt
+```
+
+PC side (dataset processing / ACT training / ONNX export): Python 3\.12 + LeRobot v0\.6\.1:
+
+```bash
+conda create -n rk3588 python=3.12 -y
+conda activate rk3588
+pip install -r requirements-dev.txt
 ```
 
 ## 6\.3 Hardware Device Detection \& Configuration Modification
