@@ -27,6 +27,7 @@ import numpy as np
 from hardware.interfaces import (
     PolicyModule, Observation, Action, TaskRequest, TaskResult,
 )
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -66,16 +67,17 @@ class GraspPipeline(PolicyModule):
 
     # ---- 手眼标定参数（实测标定角，移植自 vlm_grasp.py） ----
     # 手眼标定旋转角: 像素X+69px → 机器人 +X0.050m -Y0.104m
+    # 注: 该角度为抓取管线专有的手眼旋转标定，单处定义（非重复），暂不迁入 settings
     CAM_ANGLE = math.radians(101.9)
 
-    # 相机外参: 相机光心在机械臂基座坐标系下的位置 (米)
-    CAM_POSITION = np.array([0.182, -0.129, 0.47], dtype=float)
-
-    # 相机内参（D435i 出厂标定，来自 config/settings.py）
-    CAM_FX = 604.2294
-    CAM_FY = 604.0748
-    CAM_PPX = 315.1330
-    CAM_PPY = 250.8858
+    # 相机外参 / 内参: 统一读取单一事实来源 config/settings.py（修复配置硬编码债）
+    # 标定脚本 calibrate_extrinsics.py/calibrate_camera.py 只回写 settings.py，
+    # 此处引用而非复制字面量，避免标定值静默漂移。
+    CAM_POSITION = np.asarray(settings.CAMERA_POSITION, dtype=float)
+    CAM_FX = float(settings.CAMERA_MATRIX[0, 0])
+    CAM_FY = float(settings.CAMERA_MATRIX[1, 1])
+    CAM_PPX = float(settings.CAMERA_MATRIX[0, 2])
+    CAM_PPY = float(settings.CAMERA_MATRIX[1, 2])
 
     # ---- 抓取几何参数（移植自 vlm_grasp.py） ----
     PRE_GRASP_OFFSET = 0.08     # 接近距离: pre_grasp 在目标上方 8cm

@@ -5,6 +5,8 @@ import logging
 import numpy as np
 from typing import Optional, Callable
 
+from hardware.interfaces import HardwareModule, Observation
+
 logger = logging.getLogger(__name__)
 
 # 尝试导入 pyrealsense2（板端环境）
@@ -41,8 +43,13 @@ class FrameBuffer:
             return self._latest is not None
 
 
-class CameraManager:
+class CameraManager(HardwareModule):
     """D435i 相机管理器 -- 单一实例，线程安全帧缓冲
+
+    实现 HardwareModule 接口 (refactor_plan_v9 §4.2):
+      - setup/start/stop/is_available/on_failure: 生命周期
+      - get_observation(): 返回含 rgb/depth 的 Observation（state 由 System 与机械臂合并）
+      - execute(): 相机为只读传感器，无执行动作，no-op 返回 True
 
     用法::
 
@@ -111,6 +118,42 @@ class CameraManager:
             except Exception:
                 pass
         logger.info("CameraManager 已停止")
+
+    # ── HardwareModule 接口 (refactor_plan_v9 §4.2) ──────────────
+
+    def setup(self, config: dict) -> None:
+        """配置相机。支持 config 键: width, height, fps, warmup_seconds"""
+        if not config:
+            return
+        self.width = int(config.get("width", self.width))
+        self.height = int(config.get("height", self.height))
+        self.fps = int(config.get("fps", self.fps))
+        self.warmup_seconds = float(config.get("warmup_seconds", self.warmup_seconds))
+
+    @property
+    def is_available(self) -> bool:
+        """pyrealsense2 可用且采集线程运行中"""
+        return rs is not None and self.is_running
+
+    def on_failure(self) -> str:
+        """相机为可选依赖（menu/voice 模式可降级），失败跳过（与 main.py init_camera 语义一致）"""
+        return "skip"
+
+    def execute(self, action) -> bool:
+        """相机为只读传感器，无执行动作；no-op 返回 True"""
+        return True
+
+    def get_observation(self) -> Observation:
+        """返回含 rgb/depth 的 Observation
+
+        state（关节角）相机未知，置 None，由 System 层与机械臂观测合并。
+        尚无帧时 rgb/depth 返回 None。
+        """
+        frame = self.get_frame()
+        if frame is None:
+            return Observation(rgb=None, depth=None, state=None, timestamp=time.time())
+        rgb, depth, ts = frame
+        return Observation(rgb=rgb, depth=depth, state=None, timestamp=ts)
 
     # ── 采集线程 ──────────────────────────────────────────
 

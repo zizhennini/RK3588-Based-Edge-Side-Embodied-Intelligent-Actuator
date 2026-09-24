@@ -13,8 +13,10 @@ import logging
 import signal
 import sys
 import time
-import multiprocessing as mp
 from typing import Optional
+
+# 注: 子进程 + 共享内存运行时（规避 GIL 抖动）见 runtime/ 包，
+# 由 config.settings.USE_SUBPROCESS_RUNTIME 控制启用（默认进程内路径）。
 
 logger = logging.getLogger(__name__)
 
@@ -95,10 +97,14 @@ class System:
 
         try:
             from hardware.arm import SO101Arm
+            from policy.kinematics import Kinematics
             self.arm = SO101Arm.get_instance(
                 port=self.config["serial_port"],
                 baud=self.config["serial_baud"],
             )
+            # 组合根注入 kinematics：硬件层不再反向依赖策略层（修复依赖倒置债）
+            # 用 set_kinematics 而非构造参数，确保单例已存在时也能注入
+            self.arm.set_kinematics(Kinematics())
             self.arm.connect()
             logger.info("SO101Arm 已连接")
             return True

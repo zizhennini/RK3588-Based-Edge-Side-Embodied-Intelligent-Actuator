@@ -653,6 +653,7 @@ pip install onnx onnxruntime      # 导出验证
 | 2026-09-23 | v6-v7 | Miniconda 环境、IK Bug 分析、废弃文件策略、数据格式确认 |
 | 2026-09-23 | v8 | 技术校验：ACT 50M、数据格式 v3、Python 分离 |
 | 2026-09-23 | **v9** | **全面修正**: Python 统一 3.10；ACT 延迟 70-120ms；ONNX ~280-350MB；NPU 单进程单核；子进程替代多线程；FrameBuffer 深拷贝；串口崩溃恢复；IK 完整 6DOF；pyarrow 降 P2；第三方项目评估修正；方案精简至 ~800 行 |
+| 2026-09-24 | v9.1 | **架构债清理**（进入第三阶段前）: 修复依赖倒置(arm→policy 改依赖注入)；相机内外参统一引用 settings 单一源；新建 runtime/ 子进程+共享内存运行时(opt-in)；SO101Arm/CameraManager 落地 HardwareModule 接口；同步更新 architecture.md |
 
 ### v9 关键决策记录
 
@@ -666,3 +667,19 @@ pip install onnx onnxruntime      # 导出验证
 8. **板端录制降 P2**: pyarrow aarch64 编译困难，P0 阶段数据由 PC 端处理
 9. **第三方项目评估修正**: rdk_LeRobot_tools/IB-Robot 仅架构参考，无开箱可用脚本
 10. **ONNX opset**: scaled_dot_product_attention 需 opset 14+（非 12）
+
+### v9.1 架构债清理（2026-09-24）
+
+进入第三阶段（数据录制 / 遥操作）前，集中偿还 4 项架构债（业务功能推进快于架构清理）：
+
+| # | 债 | 处置 | 落地文件 | 验证 |
+|---|-----|------|---------|------|
+| 1 | **依赖倒置**: `hardware/arm.py:288` 在 `move_to()` 内 `from policy.kinematics import Kinematics`，硬件层反向依赖策略层 | 改**依赖注入**: `SO101Arm.__init__(kinematics=)` + `set_kinematics()`，由组合根 `main.py:init_arm` 注入 `Kinematics()`；`move_to` 用 `self._kinematics`，缺失则抛清晰错误。硬件层零 policy 导入 | `hardware/arm.py`, `main.py` | py_compile 通过；arm.py 无残留 `from policy` |
+| 2 | **配置硬编码**: 相机外参 `[0.182,-0.129,0.47]`、内参 `604.2294...` 在 `arm.py:113`、`grasp_pipeline.py:72-78` 复制字面量，标定脚本回写 settings 后静默漂移 | 统一**引用** `config.settings.CAMERA_POSITION/CAMERA_MATRIX`（grasp_pipeline 类属性从 settings 求值；arm.py 构造时读取，带兜底）。settings.py 成为单一事实来源 | `hardware/arm.py`, `policy/grasp_pipeline.py` | py_compile；settings 单一源 |
+| 3 | **子进程未落地**: 方案 §1.6/§4.1 承诺子进程 + shared_memory，实际 `main.py` 仅有 `import multiprocessing as mp` 死导入；CameraManager 用线程非子进程；ACT/GGCNN 进程内推理有 GIL 抖动风险 | 新建 `runtime/` 包: `SharedFrameBuffer`(seqlock 零拷贝跨进程帧传输) + `SubprocessWorker`(spawn+Queue+子进程内绑核) + `InferenceWorker`(ACT/GGCNN 子进程)；`settings.USE_SUBPROCESS_RUNTIME` opt-in 开关 + `CORES_*` 集中绑核配置；移除 main.py 死导入 | `runtime/shared_frame.py`, `runtime/worker.py`, `runtime/__init__.py`, `config/settings.py`, `main.py` | SharedFrameBuffer 往返 + 跨句柄 attach 自检通过；worker 导入/构造通过；**多进程编排需板端实测** |
+| 4 | **接口未落地**: `SO101Arm`/`CameraManager` 为裸类，未实现 `HardwareModule` | 两类继承 `HardwareModule`，实现 `setup/start/stop/is_available/on_failure/execute/get_observation`。arm on_failure="abort"(硬依赖)，camera on_failure="skip"(可降级)；get_observation 各填本设备可得字段(arm→state, camera→rgb/depth)，由 System 合并 | `hardware/arm.py`, `hardware/camera_d435i.py` | CameraManager 接口一致性导入测试通过；SO101Arm 同模式(py_compile 通过，板端运行时确认) |
+
+**遗留 / 后续（需板端）**:
+- 债 3 完整多进程编排（相机/ACT/GGCNN 各独立子进程 + `USE_SUBPROCESS_RUNTIME=True` 默认启用）需板端实测 GIL/延迟/NPU 单核绑定后方可开启（对应 T4.2、风险 R2）。当前默认仍走已验证的进程内路径。
+- `WORKSPACE` 在 arm.py / grasp_pipeline.py / kinematics.py 仍各有一份（非相机参数，本次未纳入）；关节限位表 arm.py(URDF 系) 与 kinematics.py(xlerobot 舵机系) 的坐标系对齐仍需板端标定确认。
+- `hardware/arm.py` 的 `SO101Arm.get_observation()` 返回 rgb/depth=None，System 层观测合并逻辑待在第三阶段遥操作/录制中实现。

@@ -37,3 +37,23 @@ MEMORY_RESERVE_MB = 200         # 系统预留内存余量
 SSD_PROTOTXT = "./models/MobileNetSSD/MobileNetSSD_deploy.prototxt"
 SSD_CAFFEMODEL = "./models/MobileNetSSD/MobileNetSSD_deploy.caffemodel"
 SSD_CONFIDENCE = 0.5
+
+# ── 子进程运行时配置 (refactor_plan_v9 §1.6 / §4.1) ──
+# True 时相机/ACT/GGCNN 的 CPU 推理走独立子进程 + 共享内存帧传输 (runtime/)，
+# 规避 Python GIL 抖动、适配 RK3588 NPU 单进程单核限制；
+# False（默认）走已验证的进程内路径。
+# 注意: 完整多进程编排需板端实测后启用 (T4.2 / 风险 R2)。
+USE_SUBPROCESS_RUNTIME = False
+
+# 各子进程 CPU 绑核（A55 小核 0-3: 相机/串口/语音/安全；A76 大核 4-7: 推理）
+# 子进程不继承父进程亲和性，runtime.worker 在子进程内用以下集合重新绑核。
+CORES_CAMERA = {0, 1}     # 相机采集 (A55, 30Hz)
+CORES_ARM_IO = {1}        # 串口 IO (A55, 50Hz)
+CORES_VOICE = {2, 3}      # 语音 KWS/ASR/TTS (A55)
+CORES_SAFETY = {2, 3}     # 安全监控 (A55)
+CORES_ACT = {4, 5}        # ACT 推理 (A76)
+CORES_GGCNN = {5}         # GGCNN 抓取检测 (A76)
+CORES_VLM = {6, 7}        # VLM 推理 (A76, 已是 RKLLM 子进程)
+
+# 共享内存帧缓冲名称（相机子进程为生产者，推理子进程为消费者）
+SHARED_FRAME_NAME = "eia_camera_frame"

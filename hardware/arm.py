@@ -11,6 +11,8 @@ from typing import Optional
 
 import scservo_sdk as scs
 
+from hardware.interfaces import HardwareModule, Observation
+
 logger = logging.getLogger(__name__)
 
 
@@ -63,11 +65,18 @@ GRIPPER_OPEN_PULSE = 2600
 GRIPPER_CLOSE_PULSE = 1781
 
 
-class SO101Arm:
+class SO101Arm(HardwareModule):
     """SO-ARM101 机械臂控制 -- 基于 scservo_sdk
 
     线程安全单例模式，防止多实例争抢串口。
     所有串口写入操作经 _safe_write 包裹，支持自动重试和串口恢复。
+
+    实现 HardwareModule 接口 (refactor_plan_v9 §4.2):
+      - setup/start/stop/is_available/on_failure: 生命周期
+      - execute(Action): 关节空间执行（write_positions + gripper）
+      - get_observation(): 返回仅含 state 的 Observation（rgb/depth 由 System 从相机合并）
+
+    kinematics 由组合根 (main.py) 注入，硬件层不反向依赖策略层（修复依赖倒置）。
     """
 
     _instance: Optional["SO101Arm"] = None
@@ -89,7 +98,8 @@ class SO101Arm:
     # 初始化
     # ------------------------------------------------------------------
     def __init__(self, port: str = "/dev/ttyACM0", baud: int = 1000000,
-                 calibration_path: str = "./config/calibration.json"):
+                 calibration_path: str = "./config/calibration.json",
+                 kinematics=None):
         # 串口
         self.port = port
         self.baud = baud
@@ -109,12 +119,83 @@ class SO101Arm:
         # 标定
         self.calibration = self._load_calibration(calibration_path)
 
-        # 外参（统一使用 settings.py 实测值）
-        self.camera_position = np.array([0.182, -0.129, 0.47])
+        # 外参：读取单一事实来源 config/settings.py（修复配置硬编码债）
+        # 标定脚本 calibrate_extrinsics.py / calibrate_camera.py 只回写 settings.py，
+        # 故此处必须引用而非复制字面量，否则标定值会静默漂移。
+        try:
+            from config import settings as _settings
+            self.camera_position = np.asarray(_settings.CAMERA_POSITION, dtype=float)
+        except Exception:
+            logger.warning("无法读取 config.settings.CAMERA_POSITION，回退默认外参")
+            self.camera_position = np.array([0.182, -0.129, 0.47])
+
+        # kinematics：由组合根 (main.py) 注入；硬件层不 import 策略层（修复依赖倒置债）
+        self._kinematics = kinematics
 
         # 状态
         self._last_cmd_angles: Optional[np.ndarray] = None
         self._connected = False
+
+    # ------------------------------------------------------------------
+    # HardwareModule 接口 (refactor_plan_v9 §4.2)
+    # ------------------------------------------------------------------
+    def set_kinematics(self, kinematics) -> None:
+        """注入运动学解算器（由组合根提供，避免硬件层反向依赖策略层）"""
+        self._kinematics = kinematics
+
+    def setup(self, config: dict) -> None:
+        """配置模块。支持 config 键: kinematics, calibration_path"""
+        if not config:
+            return
+        if config.get("kinematics") is not None:
+            self._kinematics = config["kinematics"]
+        calib = config.get("calibration_path")
+        if calib:
+            self.calibration = self._load_calibration(calib)
+
+    def start(self) -> None:
+        """启动模块（= 连接串口）"""
+        self.connect()
+
+    def stop(self) -> None:
+        """停止模块（= 断开串口，禁用扭矩）"""
+        self.disconnect()
+
+    @property
+    def is_available(self) -> bool:
+        """机械臂是否已连接可用"""
+        return self._connected
+
+    def on_failure(self) -> str:
+        """机械臂为硬性依赖，失败即中止（与 main.py init_hardware 语义一致）"""
+        return "abort"
+
+    def execute(self, action) -> bool:
+        """执行动作：关节空间位置写入 + 夹爪开合
+
+        Args:
+            action: Action(positions=(6,) rad, gripper=[0=全闭,1=全开], ...)
+        Returns:
+            是否成功
+        """
+        try:
+            self.write_positions(np.asarray(action.positions, dtype=float))
+            # gripper [0=全闭, 1=全开] → 米制宽度（量程约 0~0.08m）
+            self.gripper_width(float(action.gripper) * 0.08)
+            return True
+        except Exception as e:
+            logger.error("SO101Arm.execute 失败: %s", e)
+            return False
+
+    def get_observation(self) -> Observation:
+        """返回仅含关节状态的 Observation
+
+        机械臂无视觉传感器，rgb/depth 置 None，由 System 层与相机观测合并。
+        """
+        return Observation(
+            rgb=None, depth=None,
+            state=self.read_positions(), timestamp=time.time(),
+        )
 
     # ------------------------------------------------------------------
     # 连接管理
@@ -284,10 +365,18 @@ class SO101Arm:
         Args:
             x, y, z: 目标笛卡尔坐标（米）
             wrist_roll_rad: 腕部旋转角度（弧度），None 则保持当前值
-        """
-        from policy.kinematics import Kinematics
 
-        kin = Kinematics()
+        Note:
+            需先注入 kinematics（构造参数或 set_kinematics）。硬件层不再
+            import policy.kinematics，规避 hardware→policy 依赖倒置。
+        """
+        kin = self._kinematics
+        if kin is None:
+            raise RuntimeError(
+                "SO101Arm.move_to 需要先注入 Kinematics 实例"
+                "（SO101Arm(kinematics=...) 或 set_kinematics()）；"
+                "硬件层不再反向依赖 policy.kinematics。"
+            )
         xyz = kin.clamp_workspace(np.array([x, y, z]))
         current = self._last_cmd_angles if self._last_cmd_angles is not None \
             else self.read_positions()
