@@ -28,6 +28,23 @@
 - `docs/architecture.md`: 全面修订 — [已落地]/[规划中] 标注、并发模型对照表、配置单一源说明、架构债清理记录
 - `docs/refactor_plan_v9.md`: 开发日志追加 v9.1 + 债处置表 + 遗留项
 - `README.md` §5 代码结构树、`config/README.md`、`tests/README.md`、`docs/deploy_guide.md`、`scripts/README.md` 同步当前架构
+- `docs/test_plan.md`: 架构对齐重写 — M1→SO101Arm（含 M1.5 接口符合性）、M2→voice/ 新栈、M5 增 H264Encoder、M6→perception/+GraspPipeline 双模式、M7→config/safety+SafetyMonitor，新增 M8 相机 / M9 运动学 / M10 runtime、P0 集成验证前置项、I5/I6 端到端链路、S4 性能基准扩充（ACT/GGCNN 延迟预算、8GB 内存阈值修正）
+- `docs/deploy_guide.md`: 新增 §2.5 环境与版本矩阵 — 两端实测基线（板 3.10 + ort 1.23.2 + rknn-lite 2.3.2 / PC 3.12 + LeRobot 0.6.1）、逐包版本对照、5 条冲突红线、两端环境自检命令
+- `requirements-dev.txt`: 显式补 `safetensors>=0.4`（export_act_onnx.py 加载 checkpoint 所需，此前靠 LeRobot 传递安装）+ 版本约束注释
+- numpy PC 端约束放宽为 `>=1.24`（实测 2.2.6 随 LeRobot/torch 生态）；**<2.0 红线仅约束板端**（rknn-toolkit-lite2），requirements-dev.txt 与 deploy_guide §2.5 同步修订
+
+### 部署与环境核查（2026-09-24）
+- 两端环境实测（矩阵见 deploy_guide §2.5）：板端 conda `rk3588` = py3.10.21 / numpy 1.26.4 / ort 1.23.2 / rknnlite 2.3.2 / **新装 pyrealsense2 2.58.4 + sherpa-onnx 1.13.8**；PC 端 WSL2 conda `rk3588` = py3.12.14 / torch 2.11.0+cpu / lerobot 0.6.1 / safetensors 0.8.0 / **新装 onnx + onnxruntime + scipy**
+- 板端 `/home/elf/work/rk3588-eia/` **首次部署本项目**（此前板上无本项目——v0.3.0 所记旧部署与实板不符，`~/work/rkrobot` 为另一项目 RK3588-SO-ARM101）：代码 2.7MB + VLM 模型 1476MB（rsync 校验一致，demo/imgenc 具可执行位）；`voice/config/default.yaml` 写死的板端路径随之生效
+- PC 端（WSL2 Ubuntu 22.04）代码部署至 `/home/shimuzi/work/rk3588-eia/`（导出工具链）
+- 板端外网仅 ~40KB/s → 大资产一律 WSL2 中转（外网口下载 → 内网 rsync 板端）
+- ACT 链路暂缓：checkpoint 两端均不存在（待 LeRobot 训练产物）；GGCNN 优先（Cornell 权重 → ONNX opset 12，PC 端导出 → 传板）
+- 语音模型四件套部署板端（ASR conformer-zh 474M / matcha-icefall-zh-baker 88M / KWS zipformer-3M 39M / vocos 52M），对照 `voice/config/default.yaml` 12/12 关键文件校验通过；下载通道：板端外网仅 ~40KB/s、WSL2 GitHub 直连 ~11KB/s、gh-proxy ~277KB/s，最终 **Windows 系统代理（Clash）直下最稳**，经 WSL2 rsync 中转上板
+- GGCNN 权重实际发布于 dougsm/ggcnn **release v0.1** `ggcnn_weights_cornell.zip`（repo raw 路径返回 404 HTML——v0.3.0 待办"下载 Cornell 权重"所记 URL 有误）；`ggcnn_epoch_23_cornell_statedict.pt` 为 2018 老格式 pickle
+- `tools/export_ggcnn_onnx.py` 修复：torch>=2.6 下 `weights_only=True` 解析老权重抛 `UnpicklingError`，增加回退 `weights_only=False`（仅限可信来源）
+- GGCNN 导出实测：torch 2.11 新导出器拒绝 opset 12、**实际保持 opset 18**（板端 ort 1.23.2 可加载）；新导出器默认拆分权重为 `.onnx.data` → 已内联合并为**单文件 271,701B** 传板；板端单帧推理实测 **50.7ms**（S4.10 预算 30-50ms 上限，未绑核，worker 绑 A76 后预期改善）
+- `requirements-dev.txt` 补 `onnxscript>=0.10`（torch>=2.9 `torch.onnx.export` 新导出器依赖，部署实测发现）
+- 板端 L1 冒烟全绿：kinematics 单测 6/6、shared_frame 自检通过、**21/21 模块导入链 OK**（含 scservo_sdk/pyrealsense2/sherpa_onnx/rknnlite 全部硬件依赖）；PC 端 WSL2 自检 9/9（pyrealsense2 缺失时 CameraManager 优雅降级提示生效）
 
 ### 验证
 - 语法 23/23、本地导入一致性 172/0、运动学 FK/IK 6/6、SharedFrameBuffer 往返 + 跨句柄 attach 自检通过

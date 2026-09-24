@@ -1,13 +1,24 @@
 # =====================================================================
-# PC 端导出工具依赖（x86 Linux/Windows, Python 3.10+）
+# PC 端导出工具依赖（x86 Linux/Windows, Python 3.10+；PC 标准环境 3.12，
+# 与 LeRobot v0.6.1 的 >=3.12 要求一致）
 # refactor_plan_v9 §6.1 — 仅供 tools/export_act_onnx.py、
 # tools/export_ggcnn_onnx.py 等训练/导出工具使用，板端不安装
+#
+# 版本约束说明（2026-09 环境核查后修订）:
+#   - numpy: PC 端放宽为 >=1.24（实测 2.2.6 随 LeRobot/torch 生态）；
+#     **<2.0 红线仅约束板端**（rknn-toolkit-lite2 2.3.2 不兼容 numpy 2.x）。
+#     导出产物为 ONNX 文件，与 numpy 版本无关，不影响两端数值一致性
+#   - onnxruntime >=1.16: 两端一致（板端实测 1.23.2）
+#   - onnx >=1.14: 支持 ACT 导出所需 opset 14+（scaled_dot_product_attention）
+#     与 GGCNN 的 opset 12
 # =====================================================================
 torch>=2.0
 torchvision>=0.15
 onnx>=1.14
 onnxruntime>=1.16
+onnxscript>=0.10        # torch>=2.9 的 torch.onnx.export 新导出器依赖（2026-09 部署实测发现）
 opencv-python>=4.8,<5.0
-numpy>=1.24,<2.0
+numpy>=1.24
 scipy>=1.10
 tqdm
+safetensors>=0.4          # tools/export_act_onnx.py 加载 LeRobot checkpoint 所需

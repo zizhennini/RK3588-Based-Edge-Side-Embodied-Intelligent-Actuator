@@ -45,8 +45,76 @@ PC 端（数据集处理 / ACT 训练 / 模型导出）另建环境：
 ```bash
 conda create -n rk3588 python=3.12 -y
 conda activate rk3588
-pip install -r requirements-dev.txt   # torch / onnx / LeRobot v0.6.1
+pip install -r requirements-dev.txt   # torch / onnx / safetensors 等
+pip install lerobot==0.6.1            # 仅 PC 端需要（数据集 / ACT 训练）
 ```
+
+## 2.5 环境与版本矩阵（避免冲突）
+
+### 已验证环境基线（CHANGELOG v0.3.0 实测记录）
+
+| 端 | Python | 关键包实测版本 |
+|----|--------|----------------|
+| 板端 RK3588 | 3.10（conda `rk3588`） | onnxruntime 1.23.2、rknn-toolkit-lite2 2.3.2（本地 whl cp310）、torch 2.7.0+cpu（系统预装） |
+| PC 端 WSL2 | 3.12（conda `rk3588`） | LeRobot v0.6.1、torch 2.11.0+cpu |
+
+### 逐包版本对照
+
+| 包 | 板端 (requirements.txt) | PC 端 (requirements-dev.txt) | 约束理由 / 冲突点 |
+|----|------------------------|------------------------------|-------------------|
+| Python | 3.10 | 3.12 | **分离根因**: rknn-toolkit-lite2 2.3.2 仅提供 cp310 whl；LeRobot v0.6.1 强制 >=3.12。两端不可混用 |
+| numpy | >=1.24,<2.0（实测 1.26.4） | >=1.24（实测 2.2.6） | **红线仅板端**: rknn-toolkit-lite2 不兼容 numpy 2.x；PC 端随 LeRobot/torch 生态放宽（2026-09 核查决策），导出产物为 ONNX 文件、与 numpy 版本无关 |
+| torch | 不经 pip 安装（系统预装 2.7.0+cpu） | >=2.0（实测 2.11.0+cpu） | **红线**: 板端勿 pip 安装/升级 torch，避免覆盖 RK 优化构建；板端 torch 仅 vendored lerobot 遥操作使用 |
+| onnxruntime | >=1.16（实测 1.23.2） | >=1.16 | 两端对齐，保证导出 ONNX 的算子支持一致 |
+| onnx | —（板端不装） | >=1.14 | ACT 导出需 opset 14+（scaled_dot_product_attention）；GGCNN 用 opset 12；onnx>=1.14 均覆盖 |
+| safetensors | — | >=0.4 | `export_act_onnx.py` 加载 LeRobot checkpoint 所需；此前靠 LeRobot 传递安装，已显式化防环境漂移 |
+| rknn-toolkit-lite2 | 2.3.2（本地 whl，非 PyPI） | — | NPU 推理仅板端 |
+| pyrealsense2 | >=2.54 | — | aarch64/py310 wheel 板端已验证 |
+| feetech-servo-sdk | >=1.10 | — | 提供 `scservo_sdk` 模块（hardware/arm.py） |
+| sherpa-onnx | >=1.9 | — | 语音 KWS/ASR/TTS |
+| pexpect | >=4.8 | — | VLM RKLLM demo 子进程管理 |
+| opencv-python | >=4.8,<5.0 | >=4.8,<5.0 | 两端对齐 |
+| LeRobot | 不安装（v9 决策）；遥操作调试可选 `pip install -e ./lerobot`（vendored 子集，无 policies/ 子树，不能用于训练） | v0.6.1 | 板端推理链路零 LeRobot 依赖 |
+| ffmpeg | 系统包（需含 h264_rkmpp / scale_rkrga） | — | apt 或板卡厂商 RK 构建 |
+
+### 环境自检命令
+
+板端：
+
+```bash
+python3 - <<'EOF'
+import sys, numpy, cv2, onnxruntime, pyrealsense2, sherpa_onnx, serial, pexpect
+print("python ", sys.version.split()[0], "(want 3.10.x)")
+print("numpy  ", numpy.__version__, "(want <2.0)")
+print("ort    ", onnxruntime.__version__)
+print("cv2    ", cv2.__version__)
+EOF
+python3 -c "from rknnlite.api import RKNNLite; print('rknn-toolkit-lite2 OK')"
+ffmpeg -encoders 2>/dev/null | grep h264_rkmpp
+```
+
+PC 端：
+
+```bash
+python3 - <<'EOF'
+import sys, numpy, torch, onnx, onnxruntime, safetensors
+print("python      ", sys.version.split()[0], "(want 3.12.x)")
+print("numpy       ", numpy.__version__, "(want <2.0)")
+print("torch       ", torch.__version__)
+print("onnx        ", onnx.__version__)
+print("onnxruntime ", onnxruntime.__version__)
+print("safetensors ", safetensors.__version__)
+EOF
+python3 -c "import lerobot; print('LeRobot', lerobot.__version__, '(want 0.6.1)')"
+```
+
+### 冲突红线汇总
+
+1. **numpy 2.x 禁入板端**（rknn-toolkit-lite2 2.3.2 不兼容）；PC 端放宽 >=1.24（实测 2.2.6 随 LeRobot 生态，ONNX 产物与 numpy 版本无关）
+2. **板端不 pip 安装/升级 torch**（保留系统 RK 优化构建）
+3. **Python 3.10（板）/ 3.12（PC）严格分离**，不跨端复用 site-packages 或 conda env
+4. **ONNX opset**: GGCNN=12、ACT>=14；两端 onnxruntime>=1.16 才能加载全部导出产物
+5. **LeRobot 仅 PC 端**；板端遥操作如需可装 vendored 子集（`pip install -e ./lerobot`），与推理链路无关
 
 ## 3. 模型部署
 

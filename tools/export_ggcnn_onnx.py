@@ -15,6 +15,7 @@
 """
 import argparse
 import logging
+import pickle
 from pathlib import Path
 
 import numpy as np
@@ -61,7 +62,10 @@ class GGCNN(nn.Module):
 def load_state_dict(weights_path: Path) -> dict:
     """加载权重, 兼容 {'state_dict': ...} 包装和 'module.' 前缀 (DataParallel)
 
-    安全: 使用 weights_only=True 避免反序列化任意 Python 对象
+    优先 weights_only=True 安全加载; 老版 torch (0.4~1.x, 如 dougsm/ggcnn 官方
+    ggcnn_cornell.pth) 序列化的 pickle 含旧 opcode, torch>=2.6 的受限 unpickler
+    会抛 UnpicklingError ("Unsupported operand"), 此时回退 weights_only=False
+    —— 仅可用于来源可信的权重文件 (本脚本预期输入为官方仓库权重)。
     """
     try:
         ckpt = torch.load(weights_path, map_location="cpu", weights_only=True)
@@ -69,6 +73,10 @@ def load_state_dict(weights_path: Path) -> dict:
         # torch < 1.13 无 weights_only 参数
         logger.warning("当前 torch 版本不支持 weights_only, 请确保权重文件来源可信")
         ckpt = torch.load(weights_path, map_location="cpu")
+    except pickle.UnpicklingError as e:
+        # 老格式权重 (torch 0.4~1.x pickle) 与 weights_only=True 不兼容
+        logger.warning("weights_only=True 解析失败 (%s), 回退 weights_only=False —— 仅信任来源: %s", e, weights_path)
+        ckpt = torch.load(weights_path, map_location="cpu", weights_only=False)
     if isinstance(ckpt, dict) and "state_dict" in ckpt:
         ckpt = ckpt["state_dict"]
     if not isinstance(ckpt, dict):
