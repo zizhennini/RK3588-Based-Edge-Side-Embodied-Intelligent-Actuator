@@ -473,7 +473,16 @@ class FeetechBus:
     # 扭矩管理
     # ------------------------------------------------------------------
     def enable_torque(self, motor_ids: Optional[Sequence[int]] = None) -> None:
-        ids = motor_ids or self.motor_ids
+        """恢复扭矩（防突跳：先把 Goal_Position 对齐当前 Present_Position）
+
+        禁扭矩期间臂可能被手搬（标定场景），Goal 停留在旧值——若不直接
+        对齐，恢复扭矩瞬间舵机会冲向旧目标。Present/Goal 同为 raw 编码域，
+        直接透传无需换算。
+        """
+        ids = list(motor_ids) if motor_ids else list(self.motor_ids)
+        present = self.sync_read("Present_Position", motor_ids=ids, num_retry=1)
+        if present:
+            self.sync_write("Goal_Position", present, num_retry=1)
         for mid in ids:
             self.write("Torque_Enable", mid, 1, num_retry=1)
             self.write("Lock", mid, 1, num_retry=1)

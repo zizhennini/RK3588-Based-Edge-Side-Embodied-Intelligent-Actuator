@@ -37,9 +37,7 @@ from pathlib import Path
 # 允许从仓库根目录直接运行
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hardware.feetech_bus import (  # noqa: E402
-    FeetechBus, RESOLUTION, encode_sign_magnitude,
-)
+from hardware.feetech_bus import FeetechBus, RESOLUTION  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("calibrate_arm")
@@ -179,15 +177,13 @@ def main() -> int:
                     ok = True
                     for mid in bus.motor_ids:
                         exp, got = eeprom_calib[mid], readback[mid]
-                        # Homing_Offset 期望值按 sign-magnitude 编码后比对
-                        exp_off = encode_sign_magnitude(exp["homing_offset"], 11) \
-                            if exp["homing_offset"] < 0 else exp["homing_offset"]
-                        for key, e_v in (("homing_offset", exp_off),
-                                         ("range_min", exp["range_min"]),
-                                         ("range_max", exp["range_max"])):
-                            if abs(got[key] - e_v) > 2:
+                        # 注意: read() 已把 Homing_Offset 按 bit11 解码为带符号值，
+                        # 期望值同样是带符号 offset —— 两边统一在带符号域直接比对。
+                        # （旧版误将期望编码成无符号再比，负偏移会误报 MISMATCH）
+                        for key in ("homing_offset", "range_min", "range_max"):
+                            if abs(got[key] - exp[key]) > 2:
                                 print(f"    MISMATCH id={mid} {key}: "
-                                      f"期望 {e_v} 读回 {got[key]}")
+                                      f"期望 {exp[key]} 读回 {got[key]}")
                                 ok = False
                     print("    校验通过 ✓" if ok else "    校验存在不一致 ✗")
                     if not ok:

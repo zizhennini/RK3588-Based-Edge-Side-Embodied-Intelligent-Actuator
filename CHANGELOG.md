@@ -64,6 +64,12 @@
 - **验证**: PC 端（WSL2）单测 8/8 + kinematics 回归 6/6 + py_compile/import 链/4 工具 --help 全过 + npz 端到端 + **lerobot 0.4.4 env 数据转换验收 rc=0**（v2.x parquet+meta 10 产物）；板端单测 8/8 + **导入链 23/23**（含 feetech_bus/teleop 新模块）+ **真实硬件握手**（follower/leader 各 6×STS3215 model=777，broadcast_ping 6 ID error=0，read_positions 实测换算正常，id1 电压 4.9V/温度 28°C）+ **configure 真机验收**（用户在场确认）：写前快照 Phase bit4=1 共 5 台（G2 隐患实机证实）、写后读回全部一致（bit4 清除/Return_Delay=0/Acceleration=16/POSITION/扭矩恢复/夹爪防烧 500-250-25）、耗时 0.2s、位置读数全 [0,4096)
 - 已知平台差异（非缺陷）：PC 端 `voice.wake/asr/tts/orchestrator` 4 模块导入失败 = sherpa_onnx 未装（语音运行时仅板端职责，deploy_guide 红线 5）；真实标定（calibrate_arm）与双臂跟随（teleop）需手搬交互，按 test_plan P0.4/P1.1 执行
 
+### Follower 实机标定 + 标定链路两修复（2026-09-25，P0.4）
+- **follower(ttyACM0) 实机标定完成**：`calibrate_arm.py --write-eeprom --verify` 向导（中位归零 + 3634 帧全行程录制），Homing_Offset（带符号 +30/+5/−31/−19/−38/−90）与 Min/Max_Position_Limit 写入 6 舵机 EEPROM，只读复核 **6/6 EEPROM↔JSON 一致**；`config/calibration.json` 已更新为实机标定值
+- **修复 verify 负偏移误报**：Homing_Offset 为有符号寄存器（bit11 sign-magnitude），`read()` 读回已解码带符号，旧 verify 却把期望编码成无符号再比——中位 raw<2047 的 4 个舵机全被误报 MISMATCH；统一带符号域比对
+- **修复 enable_torque 突跳隐患（真机复现）**：禁扭矩手搬臂后 Goal_Position 停留旧值，恢复扭矩瞬间舵机冲向旧目标（标定退出时 4 关节冲出 range 最多 ~64°）；`FeetechBus.enable_torque` 现先 sync_read Present → sync_write Goal 对齐再上扭矩
+- 负偏移说明：中位 raw 读数 <2047 的舵机（id3-6）需负 Homing_Offset 把读数上移回半圈中点，属 STS3215 正常语义
+
 ### 验证
 - 语法 23/23、本地导入一致性 172/0、运动学 FK/IK 6/6、SharedFrameBuffer 往返 + 跨句柄 attach 自检通过
 - 注: 完整多进程编排（默认启用子进程）需板端实测后开启（T4.2 / 风险 R2）
