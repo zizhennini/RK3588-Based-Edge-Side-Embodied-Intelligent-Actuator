@@ -70,6 +70,12 @@
 - **修复 enable_torque 突跳隐患（真机复现）**：禁扭矩手搬臂后 Goal_Position 停留旧值，恢复扭矩瞬间舵机冲向旧目标（标定退出时 4 关节冲出 range 最多 ~64°）；`FeetechBus.enable_torque` 现先 sync_read Present → sync_write Goal 对齐再上扭矩
 - 负偏移说明：中位 raw 读数 <2047 的舵机（id3-6）需负 Homing_Offset 把读数上移回半圈中点，属 STS3215 正常语义
 
+### 协议完整性复审第二轮（2026-09-25）
+- 对照 lerobot 0.6.1 全 API 面 + 社区 commanderfun/STS3215 Servo 类 + 官方新 SDK（ftservo-python-sdk 2.0.0）逐项核查（明细与跳过理由见 plan 文档 §6）
+- **补齐**：G12 落地（`firmware_versions` + 握手固件一致性检查）、`read_diagnostics`（Status 错误标志解码/温度/电压/电流/负载+方向/Moving 一次只读全总线）、`decode_status_flags`/`decode_load` 纯函数（STS3215 位定义：bit0 Voltage/bit1 Sensor/bit2 Temperature/bit3 Current/bit5 Overload；Load bit10 方向；电流 6.5mA/step）、`wait_until_stopped`（move_sync 语义）+ `move_to(wait=True)`、`gripper_current()` 抓取闭环判据、teleop 实测 fps 统计
+- **明确跳过**（防过度设计）：reset_calibration（危险）、REG_WRITE+ACTION（SYNC_WRITE 已覆盖）、NORMALIZE_MODES（rad 语义已有）、多品牌 Protocol 1（单型号决策）、wheel mode（无场景）、官方新 SDK 引入（scservo_sdk 已部署实测+补丁就位）
+- **验证**：单测扩至 **11/11**（PC+板端双过）；板端真机只读实测——固件 6 台全 3.10 一致 ✓、诊断全健康（33-36°C / 11.9-12.0V / 错误标志空 / 静态 0mA）✓
+
 ### 验证
 - 语法 23/23、本地导入一致性 172/0、运动学 FK/IK 6/6、SharedFrameBuffer 往返 + 跨句柄 attach 自检通过
 - 注: 完整多进程编排（默认启用子进程）需板端实测后开启（T4.2 / 风险 R2）

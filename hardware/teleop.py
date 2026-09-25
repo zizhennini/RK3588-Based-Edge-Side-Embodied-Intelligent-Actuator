@@ -170,9 +170,13 @@ class TeleopPair:
                     time.sleep(sleep_left)
         except KeyboardInterrupt:
             print("\n提前结束（已保存已录帧）")
+        elapsed_total = time.perf_counter() - t0
+        measured_fps = len(frames) / elapsed_total if elapsed_total > 0 else 0.0
+        print(f"录制结束: {len(frames)} 帧, 实测 {measured_fps:.1f} fps"
+              f"（目标 {self.fps}）")
         if out_path:
             self.save(frames, out_path, duration_s=min(
-                duration_s, time.perf_counter() - t0))
+                duration_s, elapsed_total))
         return frames
 
     def save(self, frames: List[dict], out_path: str,

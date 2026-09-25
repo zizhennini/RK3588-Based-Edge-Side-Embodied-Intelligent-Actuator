@@ -272,12 +272,16 @@ class SO101Arm(HardwareModule):
     # 运动控制
     # ------------------------------------------------------------------
     def move_to(self, x: float, y: float, z: float,
-                wrist_roll_rad: Optional[float] = None) -> None:
+                wrist_roll_rad: Optional[float] = None,
+                wait: bool = False, wait_timeout_s: float = 5.0) -> None:
         """笛卡尔 IK 运动
 
         Args:
             x, y, z: 目标笛卡尔坐标（米）
             wrist_roll_rad: 腕部旋转角度（弧度），None 则保持当前值
+            wait: True 时插值下发后轮询等待各关节到位（Moving=0 且进入
+                  容差），超时仅告警不抛出（move_sync 语义）
+            wait_timeout_s: 等待超时（秒）
 
         Note:
             需先注入 kinematics（构造参数或 set_kinematics）。硬件层不再
@@ -300,6 +304,9 @@ class SO101Arm(HardwareModule):
         raws = {sid: self._rad_to_raw(sid, angles_rad[sid - 1])
                 for sid in range(1, 6)}
         self.bus.sync_write("Goal_Position", raws)
+        if wait and not self.bus.wait_until_stopped(raws, timeout_s=wait_timeout_s):
+            logger.warning("move_to 等待到位超时（%.1fs），部分关节可能未达目标",
+                           wait_timeout_s)
 
     def camera_to_robot(self, cam_x: float, cam_y: float,
                         cam_z: float) -> np.ndarray:
@@ -351,6 +358,22 @@ class SO101Arm(HardwareModule):
         pulse = int(calib["range_min"] + ratio * (calib["range_max"] - calib["range_min"]))
         pulse = max(calib["range_min"], min(calib["range_max"], pulse))
         self.bus.write("Goal_Position", MOTOR_IDS["gripper"], pulse)
+
+    def gripper_current(self):
+        """夹爪电流与负载（抓取闭环判据：夹到物体后电流/负载上升）
+
+        Returns:
+            (current_mA, load_percent) 元组；读取失败返回 None
+        """
+        gid = MOTOR_IDS["gripper"]
+        diag = self.bus.read_diagnostics([gid]).get(gid)
+        if not diag or diag["current_mA"] is None or diag["load"] is None:
+            return None
+        return diag["current_mA"], diag["load"][0]
+
+    def diagnostics(self) -> dict:
+        """全臂健康诊断透传（错误标志/温度/电压/电流/负载/运动状态）"""
+        return self.bus.read_diagnostics()
 
     def home(self, steps: int = 50, delay_s: float = 0.02) -> None:
         """归零（插值平滑）

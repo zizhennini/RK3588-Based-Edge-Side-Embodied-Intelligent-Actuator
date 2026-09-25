@@ -113,6 +113,14 @@ GRIPPER_PROTECTION = {
     "Overload_Torque": 25,       # 过载时 25% 扭矩
 }
 
+#: Status 寄存器(65) 错误标志位（STS3215 手册；与社区实现 commanderfun/STS3215 一致）
+STATUS_ERROR_FLAGS = {0: "Voltage", 1: "Sensor", 2: "Temperature",
+                      3: "Current", 5: "Overload"}
+#: Present_Current 单位: 6.5 mA/step（STS3215）
+CURRENT_MA_PER_STEP = 6.5
+#: Present_Voltage 单位: 0.1 V/step
+VOLTAGE_V_PER_STEP = 0.1
+
 
 # ---------------------------------------------------------------------------
 # sign-magnitude 编解码（独立实现，逻辑为通用位运算）
@@ -133,6 +141,23 @@ def decode_sign_magnitude(encoded: int, sign_bit: int) -> int:
     direction = (encoded >> sign_bit) & 1
     magnitude = encoded & ((1 << sign_bit) - 1)
     return -magnitude if direction else magnitude
+
+
+def decode_status_flags(status_raw: int) -> List[str]:
+    """Status 寄存器错误标志解码 → 错误名列表（空 = 健康）"""
+    return [name for bit, name in STATUS_ERROR_FLAGS.items()
+            if status_raw & (1 << bit)]
+
+
+def decode_load(load_raw: int) -> Tuple[float, str]:
+    """Present_Load 原始值（未经 sign 解码）→ (负载百分比 0-100, 方向 CW/CCW)
+
+    bit10 = 方向（1=CW, 0=CCW），低 10 位 = 幅值（0-1000 → 0-100%）。
+    抓取闭环判据: 夹到物体后负载/电流上升。
+    """
+    magnitude = load_raw & 0x3FF
+    direction = "CW" if load_raw & 0x400 else "CCW"
+    return magnitude / 10.0, direction
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +278,15 @@ class FeetechBus:
             raise ConnectionError("\n".join(lines))
         logger.info("[%s] 握手通过: %d 个 STS3215 在线 %s",
                     self.name, len(found), sorted(found))
+        # G12: 固件版本一致性（混批只警告不中止——行为差异可由标定吸收）
+        versions = self.firmware_versions(list(found))
+        unique = set(versions.values())
+        if len(unique) > 1:
+            logger.warning("[%s] 舵机固件版本不一致（混批，行为可能有差异）: %s",
+                           self.name, versions)
+        else:
+            logger.info("[%s] 固件版本: %s", self.name,
+                        next(iter(unique)) if unique else "?")
         return found
 
     def disconnect(self, disable_torque: bool = True) -> None:
@@ -591,6 +625,80 @@ class FeetechBus:
                     continue
             clamped[mid] = target
         return clamped
+
+    # ------------------------------------------------------------------
+    # 诊断与健康监测（对照社区实现 commanderfun/STS3215 Servo 类）
+    # ------------------------------------------------------------------
+    def firmware_versions(self, motor_ids: Optional[Sequence[int]] = None
+                          ) -> Dict[int, str]:
+        """读各 ID 固件版本 {id: "major.minor"}（G12）"""
+        ids = list(motor_ids) if motor_ids else list(self.motor_ids)
+        versions: Dict[int, str] = {}
+        for mid in ids:
+            try:
+                major = self.read("Firmware_Major_Version", mid, num_retry=1)
+                minor = self.read("Firmware_Minor_Version", mid, num_retry=1)
+                versions[mid] = f"{major}.{minor}"
+            except ConnectionError:
+                versions[mid] = "?"
+        return versions
+
+    def read_diagnostics(self, motor_ids: Optional[Sequence[int]] = None
+                         ) -> Dict[int, dict]:
+        """读取总线健康诊断（只读，不驱动任何运动）
+
+        Returns:
+            {id: {"errors": [错误名], "temperature": °C|None,
+                  "voltage": V|None, "current_mA": float|None,
+                  "load": (百分比, "CW"/"CCW")|None, "moving": bool}}
+        """
+        ids = list(motor_ids) if motor_ids else list(self.motor_ids)
+        status = self.sync_read("Status", motor_ids=ids, num_retry=1)
+        temp = self.sync_read("Present_Temperature", motor_ids=ids, num_retry=1)
+        volt = self.sync_read("Present_Voltage", motor_ids=ids, num_retry=1)
+        cur = self.sync_read("Present_Current", motor_ids=ids, num_retry=1)
+        load = self.sync_read("Present_Load", motor_ids=ids, num_retry=1)
+        moving = self.sync_read("Moving", motor_ids=ids, num_retry=1)
+        diag: Dict[int, dict] = {}
+        for mid in ids:
+            diag[mid] = {
+                "errors": decode_status_flags(status.get(mid, 0)),
+                "temperature": temp.get(mid),
+                "voltage": round(volt[mid] * VOLTAGE_V_PER_STEP, 1)
+                           if mid in volt else None,
+                "current_mA": round(cur[mid] * CURRENT_MA_PER_STEP, 1)
+                              if mid in cur else None,
+                "load": decode_load(load[mid]) if mid in load else None,
+                "moving": bool(moving.get(mid, 0)),
+            }
+        return diag
+
+    def wait_until_stopped(self, targets: Dict[int, int],
+                           tolerance_raw: int = 10,
+                           timeout_s: float = 5.0,
+                           poll_hz: float = 50) -> bool:
+        """轮询等待到位（move_sync 语义）: 各舵机 Moving=0 且位置进入容差
+
+        Args:
+            targets: {id: 目标 raw}
+            tolerance_raw: 到位容差（编码器步）
+        Returns:
+            True=全部到位, False=超时（调用方决定降级策略）
+        """
+        ids = list(targets)
+        deadline = time.perf_counter() + timeout_s
+        period = 1.0 / poll_hz
+        while time.perf_counter() < deadline:
+            pos = self.sync_read("Present_Position", motor_ids=ids, num_retry=0)
+            moving = self.sync_read("Moving", motor_ids=ids, num_retry=0)
+            if pos and all(
+                (not moving.get(mid, 0))
+                and abs(pos.get(mid, targets[mid]) - targets[mid]) <= tolerance_raw
+                for mid in ids
+            ):
+                return True
+            time.sleep(period)
+        return False
 
     # ------------------------------------------------------------------
     # 广播 ping 与扫描（阶段 D 工具用；裸协议解析独立实现）

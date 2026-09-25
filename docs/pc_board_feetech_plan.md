@@ -160,6 +160,8 @@ hardware/feetech_bus.py
 | lerobot 0.6.1 | `robots/so_follower/so_follower.py` + `teleoperators/so_leader/so_leader.py` | 6 关节 Motor 表、夹爪防烧、max_relative_target、标定向导、leader/follower 组装范式 |
 | Feetech 官方 SDK | `feetech-servo-sdk`（PyPI，即 scservo_sdk） | PortHandler/PacketHandler/GroupSync*（两端已装） |
 | 本项目 | `scripts/lerobot-record-lite` (61行) | 纯 pyserial 裸 SYNC_READ 包构造+解析雏形（0xFF 0xFF 0xFE ... checksum） |
+| [commanderfun/STS3215](https://github.com/commanderfun/STS3215)（社区，MIT 风格教程） | `servo.py` Servo 类 | Status 错误标志位定义（bit0 Voltage/bit1 Sensor/bit2 Temperature/bit3 Current/bit5 Overload）、Present_Load bit10 方向+低10位幅值解码、电流 6.5mA/step、move_sync 双阶段轮询语义 |
+| [ftservo/FTServo_Python](https://github.com/ftservo/FTServo_Python)（官方新 SDK，PyPI `ftservo-python-sdk` 2.0.0） | — | 已评估**不引入**：scservo_sdk 两端已部署实测、超时 Bug monkey-patch 就位、与 lerobot 生态同源；双 SDK 并存徒增维护面 |
 
 > 许可合规：lerobot 为 Apache-2.0，本方案为设计思想借鉴+独立重写（非代码复制），CHANGELOG 记录出处。
 
@@ -181,3 +183,25 @@ hardware/feetech_bus.py
 2. **record-lite argparse dest Bug**：`--robot.port` 定义后用 `args.robot.port` 点号访问（运行即崩）——显式 `dest=` 修复
 
 G11(PID)/G12(固件版本校验) 为可选项，接口已预留（`configure(pid=...)` / 控制表含 Firmware_* 寄存器）。
+
+### 协议完整性复审（第二轮，2026-09-25）
+
+对照 lerobot 0.6.1 全 API 面（motors_bus/feetech/so_follower/so_leader）+ 社区
+commanderfun/STS3215 Servo 类 + 官方新 SDK 逐项核查后：
+
+**补齐实现**：
+- **G12 落地**：`firmware_versions()` + 握手中固件一致性检查（混批警告不中止）——真机实测 6 台全 3.10 一致
+- **健康监测**：`read_diagnostics()`（Status 错误标志解码/温度/电压/电流 mA/负载%+方向/Moving，一次只读全总线）+ 纯函数 `decode_status_flags`/`decode_load`——真机实测全健康（33-36°C / 12.0V / 0 错误标志）
+- **到位等待**：`wait_until_stopped(targets, tolerance, timeout)`（move_sync 语义：Moving=0 且位置入容差）；`SO101Arm.move_to(..., wait=True)` 可选启用
+- **抓取闭环判据**：`SO101Arm.gripper_current()`（电流 mA + 负载%，夹到物体后上升）、`SO101Arm.diagnostics()` 全臂透传
+- **teleop 实测 fps 统计**（录制结束打印实际帧率 vs 目标）
+
+**明确跳过（防过度设计，理由记录）**：
+| 项 | 跳过理由 |
+|---|---|
+| `reset_calibration`（恢复出厂标定） | 危险操作，误触即丢标定；重新标定成本低（向导 3 分钟） |
+| INST_REG_WRITE + INST_ACTION | SYNC_WRITE 已满足广播同步写；延迟触发场景不存在 |
+| NORMALIZE_MODES 三模式归一化（lerobot） | arm 层已有 rad 语义 + clamp，训练数据为 rad（lerobot dataset 同源） |
+| 多品牌/Protocol 1 兼容层 | 单型号 STS3215 决策（§3 已定），无第二种总线设备 |
+| wheel mode / spin（连续旋转） | 机械臂关节无连续旋转用例；Operating_Mode 寄存器已暴露可手动切 |
+| `is_calibrated`/`set_baudrate` 显式 API | 标定存在性由 JSON 文件判断（arm 层）；波特率变更场景已被 `setup_motor`/`scan_baudrates` 覆盖 |

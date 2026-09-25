@@ -11,7 +11,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from hardware.feetech_bus import (
     STS3215_TABLE, EPROM_WRITABLE, SIGN_BITS, BAUDRATE_TABLE, SCAN_BAUDRATES,
     GRIPPER_PROTECTION, MODEL_NUMBER_STS3215, RESOLUTION,
+    STATUS_ERROR_FLAGS, CURRENT_MA_PER_STEP, VOLTAGE_V_PER_STEP,
     FeetechBus, encode_sign_magnitude, decode_sign_magnitude,
+    decode_status_flags, decode_load,
 )
 
 
@@ -133,6 +135,43 @@ def test_tables_consistency():
     print("  PASS: 波特率表/型号/分辨率/符号位常量")
 
 
+def test_status_flags_decode():
+    """Status 寄存器错误标志解码（STS3215 位定义，社区实现同源）"""
+    assert decode_status_flags(0) == []
+    assert decode_status_flags(0x01) == ["Voltage"]
+    assert decode_status_flags(0x04) == ["Temperature"]
+    got = decode_status_flags(0x04 | 0x20)  # Temperature + Overload
+    assert sorted(got) == sorted(["Temperature", "Overload"]), got
+    # bit4（未定义位）不产生条目
+    assert decode_status_flags(0x10) == []
+    # 全标志
+    all_names = set(STATUS_ERROR_FLAGS.values())
+    assert set(decode_status_flags(0x2F)) == all_names
+    print("  PASS: 0/单位/组合/未定义位/全标志 五路径")
+
+
+def test_load_decode():
+    """Present_Load 解码: bit10 方向 + 低 10 位幅值（0-1000 → 0-100%）"""
+    assert decode_load(0) == (0.0, "CCW")
+    assert decode_load(500) == (50.0, "CCW")
+    assert decode_load(0x400 | 500) == (50.0, "CW")
+    assert decode_load(0x400 | 1000) == (100.0, "CW")
+    assert decode_load(1000) == (100.0, "CCW")
+    # 幅值截断在低 10 位
+    pct, d = decode_load(0x400 | 0x3FF)
+    assert abs(pct - 102.3) < 0.1 and d == "CW"
+    print("  PASS: 零/幅值/方向/满量程/截断")
+
+
+def test_diagnostic_constants():
+    """诊断换算常量（STS3215: 电流 6.5mA/step, 电压 0.1V/step）"""
+    assert CURRENT_MA_PER_STEP == 6.5
+    assert VOLTAGE_V_PER_STEP == 0.1
+    # 真机实测锚点: 电压寄存器读 49 → 4.9V（2026-09-25 板端 verify 输出）
+    assert round(49 * VOLTAGE_V_PER_STEP, 1) == 4.9
+    print("  PASS: 常量与真机实测锚点一致")
+
+
 def test_no_sdk_graceful():
     """无 scservo_sdk 环境: 模块可导入, 实例化给出清晰指引"""
     try:
@@ -174,6 +213,9 @@ if __name__ == "__main__":
         ("clamp relative goal (G3)", test_clamp_relative_goal),
         ("raw<->rad roundtrip", test_raw_rad_roundtrip),
         ("tables consistency", test_tables_consistency),
+        ("status flags decode", test_status_flags_decode),
+        ("load decode", test_load_decode),
+        ("diagnostic constants", test_diagnostic_constants),
         ("no-sdk graceful", test_no_sdk_graceful),
         ("arm module importable", test_arm_module_importable),
     ]
