@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""lerobot-record-lite — 遥操作录制关节角度"""
+"""lerobot-record-lite — 遥操作录制关节角度（纯 pyserial，零 lerobot 依赖）
+
+两种模式:
+  默认（只录不跟随）: 裸 SYNC_READ 包读主臂角度 → JSON
+  --follow（跟随+录制）: 走 hardware.teleop.TeleopPair（30Hz leader→follower，
+    G3 帧间限幅 + 起步平滑对齐），需要 scservo_sdk（板端已装）
+
+输出 JSON 格式（两种模式一致，PC 端 scripts/json_to_lerobot.py 可转换）:
+  {"fps": 30, "total_frames": N, "duration_s": T,
+   "frames": [{"J1": deg, ..., "J6": deg, "t": sec}, ...]}
+"""
 import sys, os, json, time, datetime, struct, serial
 
 SERIAL_BAUD = 1000000
@@ -23,19 +33,50 @@ def read_leader(ser) -> dict:
     return angles
 
 
+def run_follow(args, out_path):
+    """--follow: 走 hardware.teleop.TeleopPair（跟随+录制+限幅）"""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    from hardware.teleop import TeleopPair
+    leader_calib = None
+    if args.leader_calib:
+        with open(args.leader_calib, "r", encoding="utf-8") as f:
+            leader_calib = json.load(f)
+    pair = TeleopPair(
+        leader_port=args.teleop_port, follower_port=args.robot_port,
+        fps=args.fps, leader_calibration=leader_calib,
+        follower_calibration_path=args.follower_calib,
+        max_relative_step_deg=args.max_step,
+    )
+    with pair:
+        input("按 Enter 开始跟随+录制 {} 秒...".format(args.episode_time_s))
+        pair.run(args.episode_time_s, out_path=out_path, follow=True)
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="遥操作录制关节角度")
-    parser.add_argument("--robot.port", default="/dev/ttyACM0")
-    parser.add_argument("--teleop.port", default="/dev/ttyACM1")
+    parser.add_argument("--robot.port", dest="robot_port", default="/dev/ttyACM0")
+    parser.add_argument("--teleop.port", dest="teleop_port", default="/dev/ttyACM1")
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--episode_time_s", type=int, default=10)
     parser.add_argument("--out", default=None)
+    parser.add_argument("--follow", action="store_true",
+                        help="跟随模式: 主臂带动从臂（hardware.teleop.TeleopPair）")
+    parser.add_argument("--leader-calib", default=None,
+                        help="主臂标定 JSON（follow 模式，缺省用内置默认）")
+    parser.add_argument("--follower-calib", default="./config/calibration.json",
+                        help="从臂标定 JSON（follow 模式）")
+    parser.add_argument("--max-step", type=float, default=15.0,
+                        help="G3 帧间限幅（度/帧，0=关闭）")
     args = parser.parse_args()
 
     out_path = args.out or "record_{}.json".format(datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
 
-    ser = serial.Serial(args.teleop.port, SERIAL_BAUD, timeout=0.05)
+    if args.follow:
+        run_follow(args, out_path)
+        return
+
+    ser = serial.Serial(args.teleop_port, SERIAL_BAUD, timeout=0.05)
     print("按 Enter 开始录制 {} 秒（请先启动遥操作）...".format(args.episode_time_s))
     input()
 

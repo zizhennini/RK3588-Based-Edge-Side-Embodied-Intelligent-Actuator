@@ -64,7 +64,7 @@ pip install lerobot==0.6.1            # 仅 PC 端需要（数据集 / ACT 训�
 |----|------------------------|------------------------------|-------------------|
 | Python | 3.10 | 3.12 | **分离根因**: rknn-toolkit-lite2 2.3.2 仅提供 cp310 whl；LeRobot v0.6.1 强制 >=3.12。两端不可混用 |
 | numpy | >=1.24,<2.0（实测 1.26.4） | >=1.24（实测 2.2.6） | **红线仅板端**: rknn-toolkit-lite2 不兼容 numpy 2.x；PC 端随 LeRobot/torch 生态放宽（2026-09 核查决策），导出产物为 ONNX 文件、与 numpy 版本无关 |
-| torch | 不经 pip 安装（系统预装 2.7.0+cpu） | >=2.0（实测 2.11.0+cpu） | **红线**: 板端勿 pip 安装/升级 torch，避免覆盖 RK 优化构建；板端 torch 仅 vendored lerobot 遥操作使用 |
+| torch | 系统预装 2.7.0+cpu（`/usr/local` dist-packages，厂商镜像与 rknn_toolkit_lite2 并存；conda env 内零 torch） | >=2.0（实测 2.11.0+cpu） | **红线**: 板端勿 pip 安装/升级 torch，避免覆盖系统 RK 构建；主链路零 torch 用途 |
 | onnxruntime | >=1.16（实测 1.23.2） | >=1.16 | 两端对齐，保证导出 ONNX 的算子支持一致 |
 | onnx | —（板端不装） | >=1.14 | ACT 导出需 opset 14+（scaled_dot_product_attention）；GGCNN 用 opset 12；onnx>=1.14 均覆盖 |
 | safetensors | — | >=0.4 | `export_act_onnx.py` 加载 LeRobot checkpoint 所需；此前靠 LeRobot 传递安装，已显式化防环境漂移 |
@@ -74,7 +74,7 @@ pip install lerobot==0.6.1            # 仅 PC 端需要（数据集 / ACT 训�
 | sherpa-onnx | >=1.9 | — | 语音 KWS/ASR/TTS |
 | pexpect | >=4.8 | — | VLM RKLLM demo 子进程管理 |
 | opencv-python | >=4.8,<5.0 | >=4.8,<5.0 | 两端对齐 |
-| LeRobot | 不安装（v9 决策）；遥操作调试可选 `pip install -e ./lerobot`（vendored 子集，无 policies/ 子树，不能用于训练） | v0.6.1 | 板端推理链路零 LeRobot 依赖 |
+| LeRobot | 不安装（v9 决策）；vendored 子集已于 2026-09 审计删除（src 布局须 `pip install -e` 拉入 torch 依赖链，违反板端红线；主链路为自研 scservo_sdk 封装） | v0.6.1（site-packages） | 板端推理链路零 LeRobot 依赖；板端遥操作用自研工具链 `hardware/teleop.py`（TeleopPair 30Hz 跟随）+ `scripts/lerobot-record-lite`（`--follow` 跟随或纯串口只录），标定 `tools/calibrate_arm.py`，录制数据 PC 端 `scripts/json_to_lerobot.py` 转换 |
 | ffmpeg | 系统包（需含 h264_rkmpp / scale_rkrga） | — | apt 或板卡厂商 RK 构建 |
 
 ### 环境自检命令
@@ -114,7 +114,7 @@ python3 -c "import lerobot; print('LeRobot', lerobot.__version__, '(want 0.6.1)'
 2. **板端不 pip 安装/升级 torch**（保留系统 RK 优化构建）
 3. **Python 3.10（板）/ 3.12（PC）严格分离**，不跨端复用 site-packages 或 conda env
 4. **ONNX opset**: GGCNN=12、ACT>=14；两端 onnxruntime>=1.16 才能加载全部导出产物
-5. **LeRobot 仅 PC 端**；板端遥操作如需可装 vendored 子集（`pip install -e ./lerobot`），与推理链路无关
+5. **LeRobot 仅 PC 端**（`pip install lerobot==0.6.1`，site-packages 安装）；repo 内 vendored 子集已于 2026-09 删除，板端遥操作/标定走自研工具链（`hardware/teleop.py` + `scripts/lerobot-record-lite --follow` + `tools/calibrate_arm.py` + `tools/feetech_scan.py`，scservo_sdk/纯 pyserial 实现，零 lerobot 依赖），录制数据 PC 端 `scripts/json_to_lerobot.py` 转 npz/LeRobotDataset
 
 ## 3. 模型部署
 

@@ -45,6 +45,24 @@
 - GGCNN 导出实测：torch 2.11 新导出器拒绝 opset 12、**实际保持 opset 18**（板端 ort 1.23.2 可加载）；新导出器默认拆分权重为 `.onnx.data` → 已内联合并为**单文件 271,701B** 传板；板端单帧推理实测 **50.7ms**（S4.10 预算 30-50ms 上限，未绑核，worker 绑 A76 后预期改善）
 - `requirements-dev.txt` 补 `onnxscript>=0.10`（torch>=2.9 `torch.onnx.export` 新导出器依赖，部署实测发现）
 - 板端 L1 冒烟全绿：kinematics 单测 6/6、shared_frame 自检通过、**21/21 模块导入链 OK**（含 scservo_sdk/pyrealsense2/sherpa_onnx/rknnlite 全部硬件依赖）；PC 端 WSL2 自检 9/9（pyrealsense2 缺失时 CameraManager 优雅降级提示生效）
+- 环境审计后续（2026-09-25）：板端 requests 依赖链补装（urllib3/idna/certifi——系统 dist-packages 的 requests 缺依赖所致）；**删除 vendored `lerobot/` 子集（85 文件，repo+两端部署副本）**——src 布局必须 `pip install -e`（拉入 torch 重依赖）违反板端红线，且主链路为自研 scservo_sdk 封装、对其零依赖，遥操作录制改走 `scripts/lerobot-record-lite` 轻量替代或 PC 端 pip lerobot（推翻 9251cd0 的暂留决策）；deploy_guide/test_plan 相关指引同步更新
+- 板端 env pip list 可见 torch 2.7.0+cpu/draccus/deepdiff 的归属澄清（2026-09-25 审计）：**均非本项目残留、全部保留**——torch=厂商镜像系统预装（`/usr/local/lib/python3.10/dist-packages`，396MB，与 rknn_toolkit_lite2 并存，conda env sys.path 含系统目录故 pip 可见）；draccus/deepdiff=user site（`~/.local`）历史积累，rkvla env 的 lerobot 0.4.4 共用其中 draccus，卸载会破坏 rkvla；conda rk3588 env 自身零 torch/零 lerobot 确认无误
+- 新增 `docs/pc_board_feetech_plan.md`：**PC 端/板端功能矩阵**（板端=实时推理执行端 11 功能域已全部部署、PC 端=开发/导出/训练端，数据流单向闭环：板端录制→PC 训练→导出 ONNX→传板推理）+ **自研 Feetech 协议层构建方案**——通读 lerobot 0.6.1 motors_bus/feetech/so_follower/so_leader 四文件后逐点对照，列出缺口 G1-G12（P0 四项：连接握手校验、STS3215 Phase bit4 防角度溢出、目标突变限幅、夹爪防烧三参数），规划 feetech_bus.py 协议层 + 标定向导 + 自研遥操作录制三阶段路线（零新增 pip 依赖，明确不做多品牌抽象避免过度设计）
+
+### 自研 Feetech 协议层：阶段 A-D 全量落地（2026-09-25）
+
+按 `docs/pc_board_feetech_plan.md` 四阶段全部实现并两端验证（方案文档 §6 有验收明细）：
+
+- **阶段 A 协议层**: 新增 `hardware/feetech_bus.py`（控制表驱动 STS3215 封装，lerobot Apache-2.0 设计借鉴+独立实现）——握手校验 G1（逐 ID ping+型号码 777）、Phase bit4 清除 G2、目标突变限幅纯函数 G3、夹爪防烧 G4、控制表 G7、Operating_Mode G8、sign-magnitude 编解码、串口异常恢复、broadcast_ping/多波特率扫描/setup_motor G10、标定 EEPROM 读写 G6；`hardware/arm.py` 重构为委托 FeetechBus——**公开 API 零破坏**（main.py/grasp_pipeline/safety 调用点零改动），`execute()` 新增可选 `max_relative_step_deg` 帧间限幅（G3 策略流第二道防线）；PID G11/固件校验 G12 接口预留
+- **阶段 B 标定**: 新增 `tools/calibrate_arm.py` 交互向导（握手→中位归零→30Hz 全行程录制→arm.py 兼容 JSON；可选 `--write-eeprom` 写入舵机 + `--verify` 读回校验，全程禁扭矩+退出自动恢复）
+- **阶段 C 遥操作**: 新增 `hardware/teleop.py`（LeaderArm 只读主臂 + TeleopPair 30Hz 跟随环：起步插值平滑对齐防突跳、G3 限幅、record-lite 兼容 JSON 录制）；`scripts/lerobot-record-lite` 补 `--follow` 跟随模式；新增 `scripts/json_to_lerobot.py`（PC 端录制 JSON→npz 或 LeRobotDataset，兼容 lerobot 0.4.x/0.6.x API 签名）
+- **阶段 D 工具**: 新增 `tools/feetech_scan.py`（当前/全波特率广播扫描 + 单电机出厂初始化改 ID/波特率）
+- **测试**: 新增 `tests/test_feetech_bus.py` 8 项（sign-magnitude 往返、控制表 24 地址回归、EPROM 可写集合、G3 限幅四路径、raw↔rad 换算、表一致性、无 SDK 优雅失败、arm 导入链）
+- **修复两个存量 Bug（构建中发现）**:
+  1. `arm.py` 寄存器地址对调——原把 0x29(41)=Acceleration 当 "Return_Delay_Time" 写、0x1A(26)=CW_Dead_Zone 当 "Acceleration" 写，真正的 Return_Delay_Time(addr 7) 从未被设置；控制表驱动修复，真机读回证实
+  2. `scripts/lerobot-record-lite` argparse dest Bug——`--robot.port` 定义后用 `args.robot.port` 点号访问（属性名含点，运行即崩）；显式 `dest=` 修复
+- **验证**: PC 端（WSL2）单测 8/8 + kinematics 回归 6/6 + py_compile/import 链/4 工具 --help 全过 + npz 端到端 + **lerobot 0.4.4 env 数据转换验收 rc=0**（v2.x parquet+meta 10 产物）；板端单测 8/8 + **导入链 23/23**（含 feetech_bus/teleop 新模块）+ **真实硬件握手**（follower/leader 各 6×STS3215 model=777，broadcast_ping 6 ID error=0，read_positions 实测换算正常，id1 电压 4.9V/温度 28°C）+ **configure 真机验收**（用户在场确认）：写前快照 Phase bit4=1 共 5 台（G2 隐患实机证实）、写后读回全部一致（bit4 清除/Return_Delay=0/Acceleration=16/POSITION/扭矩恢复/夹爪防烧 500-250-25）、耗时 0.2s、位置读数全 [0,4096)
+- 已知平台差异（非缺陷）：PC 端 `voice.wake/asr/tts/orchestrator` 4 模块导入失败 = sherpa_onnx 未装（语音运行时仅板端职责，deploy_guide 红线 5）；真实标定（calibrate_arm）与双臂跟随（teleop）需手搬交互，按 test_plan P0.4/P1.1 执行
 
 ### 验证
 - 语法 23/23、本地导入一致性 172/0、运动学 FK/IK 6/6、SharedFrameBuffer 往返 + 跨句柄 attach 自检通过

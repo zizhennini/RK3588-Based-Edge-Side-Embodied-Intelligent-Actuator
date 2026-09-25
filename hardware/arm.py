@@ -1,30 +1,23 @@
 # hardware/arm.py
-"""SO-ARM101 机械臂控制 -- 基于 scservo_sdk 封装"""
+"""SO-ARM101 机械臂控制 -- 基于 scservo_sdk 封装
+
+协议层委托 hardware.feetech_bus.FeetechBus（控制表驱动 + 握手校验 + STS3215
+硬件坑位修复），本模块聚焦臂语义：标定换算、IK 运动、归零、夹爪、安全限幅、
+线程安全单例。公开 API 与重构前完全兼容（main.py / grasp_pipeline / safety
+等调用点零改动）。
+"""
 import time
 import threading
 import json
 import logging
-import math
 import numpy as np
 from pathlib import Path
 from typing import Optional
 
-import scservo_sdk as scs
-
 from hardware.interfaces import HardwareModule, Observation
+from hardware.feetech_bus import FeetechBus
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Monkey-patch: 修复 feetech-servo-sdk v1.0.0 的超时计算 Bug
-# 参考: https://gitee.com/ftservo/SCServoSDK/issues/IBY2S6
-# ---------------------------------------------------------------------------
-def _patch_setPacketTimeout(self, packet_length):  # noqa: N802
-    """修复 feetech-servo-sdk v1.0.0 的超时计算 Bug"""
-    self.packet_start_time = self.getCurrentTime()
-    self.packet_timeout = (self.tx_time_per_byte * packet_length) + \
-                          (self.tx_time_per_byte * 3.0) + 50
 
 
 # ---------------------------------------------------------------------------
@@ -66,14 +59,15 @@ GRIPPER_CLOSE_PULSE = 1781
 
 
 class SO101Arm(HardwareModule):
-    """SO-ARM101 机械臂控制 -- 基于 scservo_sdk
+    """SO-ARM101 机械臂控制 -- 协议层 FeetechBus，臂语义本类
 
     线程安全单例模式，防止多实例争抢串口。
-    所有串口写入操作经 _safe_write 包裹，支持自动重试和串口恢复。
+    串口写入统一经 FeetechBus（自动重试 + 串口恢复）。
 
     实现 HardwareModule 接口 (refactor_plan_v9 §4.2):
       - setup/start/stop/is_available/on_failure: 生命周期
-      - execute(Action): 关节空间执行（write_positions + gripper）
+      - execute(Action): 关节空间执行（write_positions + gripper），
+        可选 G3 帧间突变限幅（max_relative_step_deg）
       - get_observation(): 返回仅含 state 的 Observation（rgb/depth 由 System 从相机合并）
 
     kinematics 由组合根 (main.py) 注入，硬件层不反向依赖策略层（修复依赖倒置）。
@@ -99,22 +93,12 @@ class SO101Arm(HardwareModule):
     # ------------------------------------------------------------------
     def __init__(self, port: str = "/dev/ttyACM0", baud: int = 1000000,
                  calibration_path: str = "./config/calibration.json",
-                 kinematics=None):
-        # 串口
+                 kinematics=None,
+                 max_relative_step_deg: Optional[float] = None):
+        # 串口协议层（延迟连接；scservo_sdk 缺失时此处即报 ImportError）
         self.port = port
         self.baud = baud
-        self.port_handler = scs.PortHandler(port)
-        self.packet_handler = scs.PacketHandler(0)  # Protocol 0 (STS/SCS)
-
-        # monkey-patch 修复超时计算 Bug
-        self.port_handler.setPacketTimeout = \
-            _patch_setPacketTimeout.__get__(self.port_handler, type(self.port_handler))
-
-        # SYNC 读写器
-        self.sync_writer = scs.GroupSyncWrite(
-            self.port_handler, self.packet_handler, 0x2A, 2)  # Goal_Position
-        self.sync_reader = scs.GroupSyncRead(
-            self.port_handler, self.packet_handler, 0x38, 2)  # Present_Position
+        self.bus = FeetechBus(port, baud=baud, name="arm")
 
         # 标定
         self.calibration = self._load_calibration(calibration_path)
@@ -136,6 +120,10 @@ class SO101Arm(HardwareModule):
         self._last_cmd_angles: Optional[np.ndarray] = None
         self._connected = False
 
+        # G3: execute() 帧间突变限幅（度/帧）。None=关闭（默认，保持历史行为）；
+        # 策略流（ACT 30Hz）建议 15~30，遥操作跟随由 teleop 层自行限幅。
+        self.max_relative_step_deg = max_relative_step_deg
+
     # ------------------------------------------------------------------
     # HardwareModule 接口 (refactor_plan_v9 §4.2)
     # ------------------------------------------------------------------
@@ -144,7 +132,8 @@ class SO101Arm(HardwareModule):
         self._kinematics = kinematics
 
     def setup(self, config: dict) -> None:
-        """配置模块。支持 config 键: kinematics, calibration_path"""
+        """配置模块。支持 config 键: kinematics, calibration_path,
+        max_relative_step_deg"""
         if not config:
             return
         if config.get("kinematics") is not None:
@@ -152,6 +141,8 @@ class SO101Arm(HardwareModule):
         calib = config.get("calibration_path")
         if calib:
             self.calibration = self._load_calibration(calib)
+        if config.get("max_relative_step_deg") is not None:
+            self.max_relative_step_deg = float(config["max_relative_step_deg"])
 
     def start(self) -> None:
         """启动模块（= 连接串口）"""
@@ -173,13 +164,27 @@ class SO101Arm(HardwareModule):
     def execute(self, action) -> bool:
         """执行动作：关节空间位置写入 + 夹爪开合
 
+        G3 防线：max_relative_step_deg 配置时，对上一帧指令的突变做截断
+        （仅策略流路径生效；move_to/home 为受控插值不限幅）。
+
         Args:
             action: Action(positions=(6,) rad, gripper=[0=全闭,1=全开], ...)
         Returns:
             是否成功
         """
         try:
-            self.write_positions(np.asarray(action.positions, dtype=float))
+            positions = np.asarray(action.positions, dtype=float)
+            step = self.max_relative_step_deg
+            if step is not None and self._last_cmd_angles is not None:
+                max_delta = float(np.deg2rad(step))
+                delta = positions - self._last_cmd_angles
+                clipped = np.clip(delta, -max_delta, max_delta)
+                if not np.allclose(delta, clipped):
+                    logger.warning(
+                        "execute 目标突变被限幅（G3）: max|Δ|=%.1f° > %.1f°",
+                        float(np.rad2deg(np.abs(delta).max())), step)
+                    positions = self._last_cmd_angles + clipped
+            self.write_positions(positions)
             # gripper [0=全闭, 1=全开] → 米制宽度（量程约 0~0.08m）
             self.gripper_width(float(action.gripper) * 0.08)
             return True
@@ -200,18 +205,20 @@ class SO101Arm(HardwareModule):
     # ------------------------------------------------------------------
     # 连接管理
     # ------------------------------------------------------------------
-    def connect(self) -> None:
-        """打开串口并配置舵机"""
+    def connect(self, handshake: bool = True) -> None:
+        """打开串口、握手校验（G1）并写入推荐配置（G2/G4/G8）
+
+        Args:
+            handshake: True（默认）时逐 ID ping + 型号码校验，设备缺失立即
+                       抛出 ConnectionError（fail-fast，on_failure=abort）。
+        """
         if self._connected:
             logger.warning("Already connected")
             return
-        if not self.port_handler.openPort():
-            raise IOError(f"Failed to open serial port {self.port}")
-        if not self.port_handler.setBaudRate(self.baud):
-            self.port_handler.closePort()
-            raise IOError(f"Failed to set baud rate {self.baud}")
-        logger.info("Serial port %s opened at %d baud", self.port, self.baud)
-        self._configure_motors()
+        self.bus.connect(handshake=handshake)
+        # STS3215 推荐配置：Phase bit4 防溢出、POSITION 模式、夹爪防烧、
+        # Return_Delay=0、Acceleration=16（修复原地址对调 Bug，见 feetech_bus.configure）
+        self.bus.configure(gripper_id=MOTOR_IDS["gripper"])
         self._connected = True
 
     def disconnect(self) -> None:
@@ -219,141 +226,47 @@ class SO101Arm(HardwareModule):
         if not self._connected:
             return
         try:
-            self.emergency_stop()
-        except Exception:
-            pass
-        try:
-            self.port_handler.closePort()
+            self.bus.disconnect(disable_torque=True)
         except Exception:
             pass
         self._connected = False
         logger.info("Serial port closed")
 
-    def _configure_motors(self) -> None:
-        """配置所有 6 个舵机参数（降低 Return_Delay_Time，提高加速度）"""
-        ph = self.port_handler
-        for sid in range(1, 7):
-            # Return_Delay_Time (addr 0x29) = 100 → 减少响应延迟
-            self._safe_write(
-                self.packet_handler.write1ByteTxRx,
-                ph, sid, 0x29, 100
-            )
-            # Acceleration (addr 0x1A) = 16 → 平滑加速
-            self._safe_write(
-                self.packet_handler.write1ByteTxRx,
-                ph, sid, 0x1A, 16
-            )
-        logger.debug("Motors configured (IDs 1-6)")
-
-    def _reset_serial(self) -> None:
-        """串口异常恢复：关闭 → 等待 0.5s → 重开"""
-        logger.warning("Resetting serial port %s", self.port)
-        try:
-            self.port_handler.closePort()
-        except Exception:
-            pass
-        time.sleep(0.5)
-        if not self.port_handler.openPort():
-            raise IOError(f"Failed to reopen serial port {self.port}")
-        if not self.port_handler.setBaudRate(self.baud):
-            raise IOError(f"Failed to set baud rate after reset")
-        self._configure_motors()
-        logger.info("Serial port reset complete")
-
-    def _force_reset(self) -> None:
-        """强制重置串口状态"""
-        try:
-            self.port_handler.closePort()
-        except Exception:
-            pass
-        self._connected = False
-
-    def _safe_write(self, func, *args, max_retries: int = 3):
-        """带重试和串口恢复的安全写入
-
-        scservo_sdk 的 write*TxRx 返回 (comm_result, hw_error) 元组，
-        通信失败时 comm_result != COMM_SUCCESS。此方法同时处理异常和错误码。
-
-        Args:
-            func: packet_handler 的写入方法
-            *args: 传递给 func 的参数
-            max_retries: 最大重试次数
-        Returns:
-            func 的返回值，失败返回 None
-        """
-        for attempt in range(max_retries):
-            try:
-                result = func(*args)
-                # 检查 scservo_sdk 通信结果（返回元组时）
-                if isinstance(result, tuple) and len(result) >= 1:
-                    comm_result = result[0]
-                    if comm_result != 0 and comm_result != scs.COMM_SUCCESS:
-                        logger.warning(
-                            "Comm error on attempt %d/%d: %s",
-                            attempt + 1, max_retries,
-                            self.packet_handler.getTxRxResult(comm_result)
-                        )
-                        if attempt < max_retries - 1:
-                            self._reset_serial()
-                        continue
-                return result
-            except Exception as e:
-                logger.warning("Write attempt %d/%d failed: %s",
-                               attempt + 1, max_retries, e)
-                if attempt < max_retries - 1:
-                    try:
-                        self._reset_serial()
-                    except Exception as reset_err:
-                        logger.error("Serial reset failed: %s", reset_err)
-        logger.error("Write failed after %d retries", max_retries)
-        return None
-
     # ------------------------------------------------------------------
     # 位置读写
     # ------------------------------------------------------------------
+    def _raw_to_rad(self, sid: int, raw: float) -> float:
+        mid = self.calibration[str(sid)]["homing_offset"]
+        angle_deg = (raw - mid) * 360.0 / 4095.0
+        return float(np.deg2rad(angle_deg))
+
+    def _rad_to_raw(self, sid: int, rad: float) -> int:
+        calib = self.calibration[str(sid)]
+        mid = calib["homing_offset"]
+        raw = int(np.rad2deg(rad) * 4095.0 / 360.0 + mid)
+        return max(calib["range_min"], min(calib["range_max"], raw))
+
     def read_positions(self) -> np.ndarray:
-        """SYNC_READ 批量读取 6 个舵机位置，返回弧度数组 (6,)"""
+        """SYNC_READ 批量读取 6 个舵机位置，返回弧度数组 (6,)
+
+        个别舵机无响应时该关节回退 0.0（保持历史容错行为）。
+        """
         angles = np.zeros(6)
-
-        # 添加所有舵机到 SYNC_READ（地址和长度已在构造时指定）
+        raw_map = self.bus.sync_read("Present_Position", num_retry=1)
         for sid in range(1, 7):
-            self.sync_reader.addParam(sid)
-
-        # 执行 SYNC_READ 通信
-        self.sync_reader.txRxPacket()
-
-        for sid in range(1, 7):
-            try:
-                raw_pos = self.sync_reader.getData(sid, 0x38, 2)
-                calib = self.calibration[str(sid)]
-                mid = calib["homing_offset"]
-                angle_deg = (raw_pos - mid) * 360.0 / 4095.0
-                angle_rad = np.deg2rad(angle_deg)
-                angles[sid - 1] = angle_rad
-            except Exception as e:
-                logger.debug("Failed to read servo %d: %s", sid, e)
-                angles[sid - 1] = 0.0
-
-        # 清除参数以便下次读取
-        self.sync_reader.clearParam()
+            raw = raw_map.get(sid)
+            if raw is None:
+                logger.debug("Failed to read servo %d", sid)
+                continue
+            angles[sid - 1] = self._raw_to_rad(sid, raw)
         return angles
 
     def write_positions(self, angles_rad: np.ndarray) -> None:
-        """SYNC_WRITE 批量写入 6 个关节角度（弧度）"""
-        # 清除之前的参数
-        self.sync_writer.clearParam()
-
-        for sid in range(1, 7):
-            calib = self.calibration[str(sid)]
-            mid = calib["homing_offset"]
-            deg = np.rad2deg(angles_rad[sid - 1])
-            raw = int(deg * 4095.0 / 360.0 + mid)
-            raw = max(calib["range_min"], min(calib["range_max"], raw))
-            # 添加参数: [SID, LOBYTE, HIBYTE]
-            self.sync_writer.addParam(sid, [scs.SCS_LOBYTE(raw), scs.SCS_HIBYTE(raw)])
-
-        self.sync_writer.txRxPacket()
-        self._last_cmd_angles = angles_rad.copy()
+        """SYNC_WRITE 批量写入 6 个关节角度（弧度，标定限位 clamp）"""
+        raws = {sid: self._rad_to_raw(sid, angles_rad[sid - 1])
+                for sid in range(1, 7)}
+        self.bus.sync_write("Goal_Position", raws)
+        self._last_cmd_angles = np.asarray(angles_rad, dtype=float).copy()
 
     # ------------------------------------------------------------------
     # 运动控制
@@ -384,15 +297,9 @@ class SO101Arm(HardwareModule):
         self._last_cmd_angles = angles_rad.copy()
 
         # 写入前 5 个关节（不含夹爪）
-        self.sync_writer.clearParam()
-        for sid in range(1, 6):
-            calib = self.calibration[str(sid)]
-            mid = calib["homing_offset"]
-            deg = np.rad2deg(angles_rad[sid - 1])
-            raw = int(deg * 4095.0 / 360.0 + mid)
-            raw = max(calib["range_min"], min(calib["range_max"], raw))
-            self.sync_writer.addParam(sid, [scs.SCS_LOBYTE(raw), scs.SCS_HIBYTE(raw)])
-        self.sync_writer.txRxPacket()
+        raws = {sid: self._rad_to_raw(sid, angles_rad[sid - 1])
+                for sid in range(1, 6)}
+        self.bus.sync_write("Goal_Position", raws)
 
     def camera_to_robot(self, cam_x: float, cam_y: float,
                         cam_z: float) -> np.ndarray:
@@ -426,12 +333,8 @@ class SO101Arm(HardwareModule):
         Args:
             open: True=打开, False=关闭
         """
-        ph = self.port_handler
         pulse = GRIPPER_OPEN_PULSE if open else GRIPPER_CLOSE_PULSE
-        self._safe_write(
-            self.packet_handler.write2ByteTxRx,
-            ph, 6, 0x2A, pulse
-        )
+        self.bus.write("Goal_Position", MOTOR_IDS["gripper"], pulse)
 
     def gripper_width(self, width_m: float) -> None:
         """自适应夹爪宽度（米制转脉冲）
@@ -439,7 +342,7 @@ class SO101Arm(HardwareModule):
         Args:
             width_m: 夹爪开合宽度（米），范围约 [0.0, 0.08]
         """
-        calib = self.calibration["6"]
+        calib = self.calibration[str(MOTOR_IDS["gripper"])]
         # 将米制宽度线性映射到脉冲范围
         # 假设全开 ~0.08m 对应 range_max, 全闭 0m 对应 range_min
         max_width = 0.08  # 最大开合宽度（米）
@@ -447,10 +350,7 @@ class SO101Arm(HardwareModule):
         ratio = width_m / max_width
         pulse = int(calib["range_min"] + ratio * (calib["range_max"] - calib["range_min"]))
         pulse = max(calib["range_min"], min(calib["range_max"], pulse))
-        self._safe_write(
-            self.packet_handler.write2ByteTxRx,
-            self.port_handler, 6, 0x2A, pulse
-        )
+        self.bus.write("Goal_Position", MOTOR_IDS["gripper"], pulse)
 
     def home(self, steps: int = 50, delay_s: float = 0.02) -> None:
         """归零（插值平滑）
@@ -461,46 +361,36 @@ class SO101Arm(HardwareModule):
         """
         current = self.read_positions()
         target = HOME_POSE
+        gripper_id = MOTOR_IDS["gripper"]
+        calib_g = self.calibration[str(gripper_id)]
 
         for i in range(1, steps + 1):
             t = i / steps
             angles = current * (1 - t) + target * t
 
             # 写入前 5 个关节
-            self.sync_writer.clearParam()
-            for sid in range(1, 6):
-                calib = self.calibration[str(sid)]
-                mid = calib["homing_offset"]
-                deg = np.rad2deg(angles[sid - 1])
-                raw = int(deg * 4095.0 / 360.0 + mid)
-                raw = max(calib["range_min"], min(calib["range_max"], raw))
-                self.sync_writer.addParam(sid, [scs.SCS_LOBYTE(raw), scs.SCS_HIBYTE(raw)])
-            self.sync_writer.txRxPacket()
+            raws = {sid: self._rad_to_raw(sid, angles[sid - 1])
+                    for sid in range(1, 6)}
+            self.bus.sync_write("Goal_Position", raws)
 
             # 夹爪插值
-            calib_g = self.calibration["6"]
             g_pulse = int(np.interp(
                 angles[5],
                 [JOINT_LIMITS["gripper"][0], JOINT_LIMITS["gripper"][1]],
                 [calib_g["range_min"], calib_g["range_max"]]
             ))
             g_pulse = max(calib_g["range_min"], min(calib_g["range_max"], g_pulse))
-            self._safe_write(
-                self.packet_handler.write2ByteTxRx,
-                self.port_handler, 6, 0x2A, g_pulse
-            )
+            self.bus.write("Goal_Position", gripper_id, g_pulse)
             time.sleep(delay_s)
 
         self._last_cmd_angles = target.copy()
 
     def emergency_stop(self) -> None:
         """急停 — 禁用所有舵机扭矩"""
-        ph = self.port_handler
-        for sid in range(1, 7):
-            self._safe_write(
-                self.packet_handler.write1ByteTxRx,
-                ph, sid, 0x28, 0  # Torque_Enable = 0
-            )
+        try:
+            self.bus.disable_torque()
+        except Exception as e:
+            logger.error("急停禁扭矩失败: %s", e)
         self._connected = False
         logger.warning("Emergency stop triggered")
 
@@ -539,6 +429,15 @@ class SO101Arm(HardwareModule):
     # ------------------------------------------------------------------
     # 资源释放
     # ------------------------------------------------------------------
+    def _force_reset(self) -> None:
+        """强制重置串口状态"""
+        try:
+            self.bus.port_handler.closePort()
+        except Exception:
+            pass
+        self.bus._connected = False
+        self._connected = False
+
     def close(self) -> None:
         """释放资源 + 清除单例（允许重建）"""
         try:
