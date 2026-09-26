@@ -8,19 +8,23 @@
   3. 中位归零: 将臂摆到各关节行程中点 → 记录 homing（半圈中点）
   4. 行程录制: 逐关节搬动全行程 → 30Hz 轮询记录 min/max raw
      （wrist_roll 固定 0-4095 全圈；夹爪开合数次录行程）
+     **行程决定角度零点**（官方 DEGREES 语义: mid=(range_min+range_max)/2），
+     所以必须推到机械行程两端；homing 仅用于 EEPROM 归零，不参与角度换算
   5. 生成 config/calibration.json —— 与 SO101Arm._load_calibration 完全兼容
-     （homing_offset = 中位 raw 值，换算公式 (raw-mid)*360/4095 不变）
+     （换算公式 (raw-行程中点)*360/4095，夹爪仍用 homing_offset 为零点）
   6. 可选 --write-eeprom: 把 Homing_Offset/Min/Max_Position_Limit 写入舵机
      EEPROM（标定跟随舵机本体，sign-magnitude bit11 编码），写入后 JSON
      自动切换到舵机偏移后的新坐标系
   7. 可选 --verify: 读回 EEPROM 与期望值比对（容差 ±2）
 
 用法:
-    # 板端（follower 臂）
+    # 板端（follower 臂，第一只）
     python tools/calibrate_arm.py --port /dev/ttyACM0
-    # leader 臂（遥操作主臂）
-    python tools/calibrate_arm.py --port /dev/ttyACM1 --output config/calibration_leader.json
-    # 标定写入舵机 EEPROM + 校验
+    # leader 臂（第二只，零点从 follower 推导——两臂摆相同姿态即可对齐零点，
+    # 官方语义"相同物理姿态 = 相同角度值"，消除主从恒定偏差）
+    python tools/calibrate_arm.py --port /dev/ttyACM1 --output config/calibration_leader.json \
+        --derive-from-port /dev/ttyACM0 --derive-from-calib config/calibration.json
+    # 标定写入舵机 EEPROM + 校验（官方对 leader/follower 都写入）
     python tools/calibrate_arm.py --port /dev/ttyACM0 --write-eeprom --verify
 
 安全: 向导全程扭矩禁用（手搬无阻力）；退出（含 Ctrl-C）自动恢复。
@@ -64,6 +68,9 @@ def record_ranges(bus: FeetechBus, motor_ids) -> dict:
     mins = {mid: RESOLUTION - 1 for mid in motor_ids}
     maxs = {mid: 0 for mid in motor_ids}
     print("\n>>> 请用手缓慢搬动每个关节走完全部行程（夹爪开合数次）。")
+    print("    ⚠ 本步骤决定角度零点（官方 DEGREES 语义: 零点 = 行程中点），")
+    print("      请把每个关节都推到【机械行程两端到底】（左右/上下都推到位），")
+    print("      主从两臂用同样的力度推到底，零点才会对齐（避免跟随恒定偏差）。")
     print("    录制中... 完成后按 Enter 结束（Ctrl-C 同样安全退出）")
     stop = {"flag": False}
 
@@ -106,6 +113,13 @@ def main() -> int:
                         help="写入后读回 EEPROM 校验（容差 ±2）")
     parser.add_argument("--no-handshake", action="store_true",
                         help="跳过握手校验（调试用）")
+    parser.add_argument("--derive-from-port", default=None,
+                        help="参考臂串口（零点推导模式）：标第二只臂时用。两臂摆到完全相同的"
+                             "物理姿态，homing 由参考臂标定推导（mid_本臂 = raw_本臂 − raw_参考 + "
+                             "homing_参考），保证官方语义『相同物理姿态 = 相同角度值』，"
+                             "消除自由摆放造成的主从零点错位（恒定跟随偏差）")
+    parser.add_argument("--derive-from-calib", default="config/calibration.json",
+                        help="参考臂标定 JSON（--derive-from-port 时读取其 homing_offset）")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -118,12 +132,44 @@ def main() -> int:
     try:
         with bus.torque_disabled():
             # ---- 步骤 1: 中位归零 ----
-            wait_enter("请用手将机械臂摆到【中位姿态】：每个关节位于其行程的中点附近"
-                       "（参考: 大臂竖直、小臂水平、夹爪半开）")
-            mid_raw = bus.sync_read("Present_Position", num_retry=2)
-            if len(mid_raw) != len(bus.motor_ids):
-                missing = set(bus.motor_ids) - set(mid_raw)
-                raise ConnectionError(f"中位读取失败，无响应 ID: {sorted(missing)}")
+            if args.derive_from_port:
+                print("\n>>> 【零点推导模式】（官方语义: 相同物理姿态 = 相同角度值）")
+                print("    1. 参考臂（%s）摆到其中位姿态并固定，之后不要再碰它" % args.derive_from_port)
+                print("    2. 把【被标定臂】搬到与参考臂【完全相同的姿态】（目测重合、同形状）")
+                print("    3. 两臂都不要再碰")
+                wait_enter("两臂姿态已重合")
+                ref_bus = FeetechBus(args.derive_from_port, baud=args.baud, name="ref")
+                ref_bus.connect(handshake=False)
+                try:
+                    ref_raw = ref_bus.sync_read("Present_Position", num_retry=2)
+                finally:
+                    ref_bus.disconnect(disable_torque=False)
+                if len(ref_raw) != len(bus.motor_ids):
+                    raise ConnectionError(
+                        f"参考臂读取不全: {sorted(ref_raw)}（检查 {args.derive_from_port}）")
+                self_raw = bus.sync_read("Present_Position", num_retry=2)
+                if len(self_raw) != len(bus.motor_ids):
+                    raise ConnectionError(f"被标定臂读取不全: {sorted(self_raw)}")
+                with open(args.derive_from_calib, "r", encoding="utf-8") as f:
+                    ref_calib = json.load(f)
+                mid_raw = {}
+                print("    零点推导（mid = raw本臂 − raw参考 + homing参考）:")
+                for m in bus.motor_ids:
+                    ref_mid = int(ref_calib[str(m)]["homing_offset"])
+                    derived = int(round(self_raw[m] - ref_raw[m] + ref_mid))
+                    mid_raw[m] = derived
+                    print("      id%d: raw本=%d raw参=%d homing参=%d → 推导 homing=%d"
+                          % (m, self_raw[m], ref_raw[m], ref_mid, derived))
+            else:
+                wait_enter("请用手将机械臂摆到【中位姿态】：所有关节位于各自行程的中点"
+                           "（官方语义 middle of range of motion）。\n"
+                           "    推荐参考姿态: 底座朝前、大臂竖直向上、小臂水平向前、腕水平、夹爪半开朝前。\n"
+                           "    ⚠ 标定第二只臂时必须与第一只臂使用【完全相同】的物理参考姿态，"
+                           "否则主从零点错位会造成跟随恒定偏差（推荐用 --derive-from-port 自动对齐）")
+                mid_raw = bus.sync_read("Present_Position", num_retry=2)
+                if len(mid_raw) != len(bus.motor_ids):
+                    missing = set(bus.motor_ids) - set(mid_raw)
+                    raise ConnectionError(f"中位读取失败，无响应 ID: {sorted(missing)}")
             print("    中位 raw:", {mid: v for mid, v in sorted(mid_raw.items())})
 
             # ---- 步骤 2: 行程录制 ----
@@ -144,7 +190,8 @@ def main() -> int:
                     "range_max": int(hi),
                 }
                 print(f"    {JOINT_LABELS[mid]}: mid={mid_raw[mid]} "
-                      f"range=[{lo}, {hi}] span={hi - lo}")
+                      f"range=[{lo}, {hi}] span={hi - lo} "
+                      f"角度零点(行程中点)={(lo + hi) / 2:.1f}")
 
             # ---- 步骤 4: 可选写 EEPROM ----
             if args.write_eeprom:

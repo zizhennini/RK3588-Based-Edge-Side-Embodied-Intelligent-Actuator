@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Optional
 
 from hardware.interfaces import HardwareModule, Observation
-from hardware.feetech_bus import FeetechBus
+from hardware.feetech_bus import (FeetechBus, GRIPPER_MOTOR_ID, angle_zero,
+                                  rad_to_raw, raw_to_rad)
 
 logger = logging.getLogger(__name__)
 
@@ -235,16 +236,22 @@ class SO101Arm(HardwareModule):
     # ------------------------------------------------------------------
     # 位置读写
     # ------------------------------------------------------------------
+    def _calib_mid(self, sid: int) -> float:
+        """关节角度零点（raw 值域）
+
+        体关节(1-5) 用行程中点 (range_min+range_max)/2 —— lerobot DEGREES 官方语义；
+        夹爪(6) 沿用标定中位点 homing_offset（0 rad = 夹爪闭合位，本实现既有语义）。
+        """
+        return angle_zero(self.calibration[str(sid)],
+                          use_range_midpoint=(sid != GRIPPER_MOTOR_ID))
+
     def _raw_to_rad(self, sid: int, raw: float) -> float:
-        mid = self.calibration[str(sid)]["homing_offset"]
-        angle_deg = (raw - mid) * 360.0 / 4095.0
-        return float(np.deg2rad(angle_deg))
+        return raw_to_rad(raw, self.calibration[str(sid)],
+                          use_range_midpoint=(sid != GRIPPER_MOTOR_ID))
 
     def _rad_to_raw(self, sid: int, rad: float) -> int:
-        calib = self.calibration[str(sid)]
-        mid = calib["homing_offset"]
-        raw = int(np.rad2deg(rad) * 4095.0 / 360.0 + mid)
-        return max(calib["range_min"], min(calib["range_max"], raw))
+        return rad_to_raw(rad, self.calibration[str(sid)],
+                          use_range_midpoint=(sid != GRIPPER_MOTOR_ID))
 
     def read_positions(self) -> np.ndarray:
         """SYNC_READ 批量读取 6 个舵机位置，返回弧度数组 (6,)

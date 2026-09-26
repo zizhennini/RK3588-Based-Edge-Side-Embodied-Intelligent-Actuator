@@ -17,7 +17,8 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
-from hardware.feetech_bus import FeetechBus
+from hardware.feetech_bus import (FeetechBus, GRIPPER_MOTOR_ID, angle_zero,
+                                  raw_to_rad)
 from hardware.arm import SO101Arm, DEFAULT_CALIBRATION, JOINT_NAMES
 
 logger = logging.getLogger(__name__)
@@ -34,19 +35,27 @@ class LeaderArm:
 
     def connect(self, handshake: bool = True) -> None:
         self.bus.connect(handshake=handshake)
-        # 主臂全程禁扭矩（人手自由搬动），无需 configure 防烧/模式写入
+        # leader 与 follower 必须同配置（lerobot SOLeader.configure 同款）：
+        # Return_Delay_Time=0 / Maximum_Acceleration / Acceleration / PID /
+        # Operating_Mode=POSITION / Phase bit4+bit6 对齐。之后保持禁扭矩供人手搬动。
+        self.bus.configure(gripper_id=None)
         self.bus.disable_torque()
         self._connected = True
-        logger.info("LeaderArm 已连接（扭矩禁用，可手搬）")
+        logger.info("LeaderArm 已连接（configure 完成，扭矩禁用，可手搬）")
 
     def disconnect(self) -> None:
         if self._connected:
             self.bus.disconnect(disable_torque=False)
             self._connected = False
 
+    def _calib_mid(self, sid: int) -> float:
+        """角度零点：体关节用行程中点（官方 DEGREES 语义），夹爪用标定中位点"""
+        return angle_zero(self.calibration[str(sid)],
+                          use_range_midpoint=(sid != GRIPPER_MOTOR_ID))
+
     def _raw_to_rad(self, sid: int, raw: float) -> float:
-        mid = self.calibration[str(sid)]["homing_offset"]
-        return float(np.deg2rad((raw - mid) * 360.0 / 4095.0))
+        return raw_to_rad(raw, self.calibration[str(sid)],
+                          use_range_midpoint=(sid != GRIPPER_MOTOR_ID))
 
     def read_raw(self) -> Dict[int, int]:
         """SYNC_READ 6 关节原始值 {id: raw}（个别缺响应则该键缺失）"""
@@ -133,12 +142,12 @@ class TeleopPair:
         self._last_cmd = joints.copy()
         return joints
 
-    def run(self, duration_s: float, out_path: Optional[str] = None,
+    def run(self, duration_s: float = 0, out_path: Optional[str] = None,
             follow: bool = True) -> List[dict]:
-        """运行遥操作环 duration_s 秒并录制
+        """运行遥操作环并录制
 
         Args:
-            duration_s: 录制时长
+            duration_s: 录制时长（秒）；<=0 或 None = **无限时**，Ctrl-C 结束并保存
             out_path: JSON 输出路径（None 不保存）
             follow: False 时只录不跟随（从臂不动）
         Returns:
@@ -146,13 +155,20 @@ class TeleopPair:
         """
         frames: List[dict] = []
         period = 1.0 / self.fps
-        print(f"遥操作录制 {duration_s:.0f}s @ {self.fps}fps"
-              f"（follow={follow}）... Ctrl-C 提前结束并保存")
+        unlimited = duration_s is None or duration_s <= 0
+        if unlimited:
+            print(f"无限时跟随 @ {self.fps}fps（follow={follow}）... "
+                  f"Ctrl-C 结束并保存")
+        else:
+            print(f"遥操作录制 {duration_s:.0f}s @ {self.fps}fps"
+                  f"（follow={follow}）... Ctrl-C 提前结束并保存")
+        leader_fail_frames = 0   # 连续丢帧计数（无限时自恢复用）
+        recovered = 0
         t0 = time.perf_counter()
         try:
             while True:
                 elapsed = time.perf_counter() - t0
-                if elapsed >= duration_s:
+                if not unlimited and elapsed >= duration_s:
                     break
                 loop_t = time.perf_counter()
                 if follow:
@@ -160,23 +176,37 @@ class TeleopPair:
                 else:
                     joints = self.leader.read_joints()
                 if joints is not None:
+                    leader_fail_frames = 0
                     frame = {f"J{i + 1}": round(float(np.rad2deg(joints[i])), 1)
                              for i in range(6)}
                     frame["t"] = round(elapsed, 3)
                     frames.append(frame)
+                else:
+                    # 无限时场景自恢复: leader 连续丢帧 1 秒 → 尝试串口重置
+                    leader_fail_frames += 1
+                    if leader_fail_frames >= self.fps:
+                        recovered += 1
+                        logger.warning(
+                            "leader 连续丢帧 %d 帧，尝试串口恢复（第 %d 次）",
+                            leader_fail_frames, recovered)
+                        try:
+                            self.leader.bus.reset_serial()
+                        except Exception as e:
+                            logger.error("leader 串口恢复失败: %s", e)
+                        leader_fail_frames = 0
                 # 恒定帧率
                 sleep_left = period - (time.perf_counter() - loop_t)
                 if sleep_left > 0:
                     time.sleep(sleep_left)
         except KeyboardInterrupt:
-            print("\n提前结束（已保存已录帧）")
+            print("\n结束（保存已录帧）")
         elapsed_total = time.perf_counter() - t0
         measured_fps = len(frames) / elapsed_total if elapsed_total > 0 else 0.0
-        print(f"录制结束: {len(frames)} 帧, 实测 {measured_fps:.1f} fps"
-              f"（目标 {self.fps}）")
+        print(f"录制结束: {len(frames)} 帧, {elapsed_total:.1f}s, "
+              f"实测 {measured_fps:.1f} fps（目标 {self.fps}）"
+              + (f", 串口自恢复 {recovered} 次" if recovered else ""))
         if out_path:
-            self.save(frames, out_path, duration_s=min(
-                duration_s, elapsed_total))
+            self.save(frames, out_path, duration_s=elapsed_total)
         return frames
 
     def save(self, frames: List[dict], out_path: str,

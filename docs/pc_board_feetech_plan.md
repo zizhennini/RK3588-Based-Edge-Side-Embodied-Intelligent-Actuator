@@ -205,3 +205,35 @@ commanderfun/STS3215 Servo 类 + 官方新 SDK 逐项核查后：
 | 多品牌/Protocol 1 兼容层 | 单型号 STS3215 决策（§3 已定），无第二种总线设备 |
 | wheel mode / spin（连续旋转） | 机械臂关节无连续旋转用例；Operating_Mode 寄存器已暴露可手动切 |
 | `is_calibrated`/`set_baudrate` 显式 API | 标定存在性由 JSON 文件判断（arm 层）；波特率变更场景已被 `setup_motor`/`scan_baudrates` 覆盖 |
+
+### 协议与官方语义对齐（第三轮，2026-09-25）
+
+起因：无限时跟随实测出现「轨迹对不上 + 恒定偏差 + 部分关节反向」。逐行对照
+lerobot `feetech.py`（configure_motors/write_calibration/_get_half_turn_homings）、
+`motors_bus.py`（`_normalize`/`_unnormalize` 的 DEGREES 模式）、`so_follower.py`
+（configure）、`so_leader.py`、`tables.py`、`config_so_follower.py` 后定位 **4 个实质缺陷**：
+
+| # | 缺陷 | 官方值/语义 | 影响 | 修复 |
+|---|---|---|---|---|
+| 1 | 角度零点用 `homing_offset`（手摆中位点） | `mid=(range_min+range_max)/2`（DEGREES 模式） | 主从两臂零点不重合 → **跟随恒定偏差 + 轨迹错位** | 新增纯函数 `angle_zero/raw_to_rad/rad_to_raw`（feetech_bus），arm/teleop 统一调用；体关节用行程中点，夹爪保留 homing 零点（官方夹爪走 RANGE_0_100，语义不同） |
+| 2 | `Acceleration = 16` | `configure_motors(acceleration=254)` | 从臂加速迟滞 → 跟随滞后 | 默认改 254 |
+| 3 | `Maximum_Acceleration`（addr 85）从未写入 | `maximum_acceleration=254` | 出厂默认上限压住梯形加减速 | configure 写入 254 |
+| 4 | PID 从未写入（仅显式传参时写） | `position_p/i/d = 16/0/32` | 位置环刚度/阻尼非官方值 | configure 默认写 `DEFAULT_PID` |
+
+**额外加固（lerobot 未覆盖的真机坑位）**：
+
+- **Phase bit6 编码器计数方向位**：真机实测 leader 5 个关节（J1/J3/J4/J5/J6）Phase=0x4C
+  （bit6=1），follower 全 0x0C —— 两臂这些关节**读数方向天生相反**，遥操作时该关节
+  反向（J2 恰好同向）。这是「甚至相反」的硬件级根因。configure 新增
+  `align_direction=True`：检测并清除 bit6，同时 WARNING 明确提示「须重录本臂行程标定」。
+- **`configure()` 全项落进控制表 + 单测锚定**：新增回归测试 `lerobot parity defaults`
+  锁定 PID 16/0/32、加速度 254、Phase 位掩码、configure 签名默认值，防回退。
+- 主臂（leader）也执行 configure（`gripper_id=None`）：lerobot `SOLeader.configure`
+  同款（configure_motors + Operating_Mode），写完立即禁扭矩保持可手搬。
+
+**标定流程相应调整**：行程录制从「次要步骤」升为**决定角度零点**的关键步骤
+（必须把每个关节推到机械行程两端到底；主从两臂同样力道推到底，零点才会对齐），
+向导文案与打印（新增「角度零点(行程中点)」列）同步更新；`--derive-from-port`
+零点推导降级为「EEPROM 归零一致性」可选步骤（角度换算不再依赖它）。
+
+**真机验证**：板端单测 13/13 通过（新增 `angle zero semantics` / `lerobot parity defaults`）。

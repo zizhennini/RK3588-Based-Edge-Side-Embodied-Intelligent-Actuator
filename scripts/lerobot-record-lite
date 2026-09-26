@@ -48,7 +48,10 @@ def run_follow(args, out_path):
         max_relative_step_deg=args.max_step,
     )
     with pair:
-        input("按 Enter 开始跟随+录制 {} 秒...".format(args.episode_time_s))
+        if args.episode_time_s <= 0:
+            input("按 Enter 开始无限时跟随+录制（Ctrl-C 结束并保存）...")
+        else:
+            input("按 Enter 开始跟随+录制 {} 秒...".format(args.episode_time_s))
         pair.run(args.episode_time_s, out_path=out_path, follow=True)
 
 

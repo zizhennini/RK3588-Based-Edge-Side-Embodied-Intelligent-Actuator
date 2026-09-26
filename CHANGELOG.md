@@ -1,5 +1,40 @@
 # 开发日志 (CHANGELOG)
 
+## 协议与 lerobot 官方语义对齐（2026-09-25）
+
+起因：无限时主从跟随实测「轨迹对不上 + 恒定偏差 + 部分关节反向」。逐行对照
+lerobot `feetech.py` / `motors_bus.py`（DEGREES 归一化）/ `so_follower.py` /
+`so_leader.py` / `tables.py` / `config_so_follower.py`，定位并修复 4 个协议缺陷：
+
+### 修复
+- **角度零点语义（主因）**: 原实现用 `homing_offset`（标定手摆中位点）作为角度零点；
+  官方 `MotorNormMode.DEGREES` 用 **行程中点 `(range_min+range_max)/2`**
+  （`motors_bus._normalize/_unnormalize`）。两者物理上不是同一位置，导致主从两臂零点
+  不重合 → 跟随恒定偏差与轨迹错位。新增协议层纯函数 `angle_zero/raw_to_rad/rad_to_raw`
+  （`hardware/feetech_bus.py`），`arm.py`/`teleop.py` 统一调用；体关节用行程中点，
+  夹爪保留 homing 零点（官方夹爪走 RANGE_0_100，语义不同，已在文档记录）
+- **`Acceleration` 16 → 254**: 官方 `configure_motors(acceleration=254)`；原值造成从臂
+  加速迟滞、跟随滞后
+- **补齐 `Maximum_Acceleration`（addr 85）= 254**: 原实现从未写入，出厂上限压住梯形加减速
+- **补齐 PID 写入**: 官方 `position_p/i/d_coefficient = 16/0/32`
+  （`SOFollowerConfig` 默认值），原实现仅在显式传 `pid` 时写
+
+### 新增（lerobot 未覆盖的真机坑位）
+- **Phase bit6 编码器计数方向位检测与对齐**: 真机实测 leader 5 个关节（J1/J3/J4/J5/J6）
+  Phase=0x4C（bit6=1）而 follower 全 0x0C —— 两臂这些关节读数方向天生相反，是「跟随
+  反向」的硬件级根因（J2 恰好同向）。`configure(align_direction=True)` 检测并清除，
+  并 WARNING 提示「须重录本臂行程标定」
+- **主臂也执行 configure**（`gripper_id=None`）: 对齐 lerobot `SOLeader.configure`
+  （configure_motors + Operating_Mode），写完立即禁扭矩保持可手搬
+- **标定向导**: 行程录制升级为「决定角度零点」的关键步骤（文案强调推到机械行程两端、
+  主从同力道），标定汇总新增「角度零点(行程中点)」列；`--derive-from-port` 降级为
+  EEPROM 归零一致性可选步骤
+- **单测 11 → 13**: 新增 `angle zero semantics (lerobot DEGREES)` 与
+  `lerobot parity defaults`（锁定 PID/加速度/Phase 掩码/configure 签名，防回退）；
+  板端 13/13 通过
+
+文档: `docs/pc_board_feetech_plan.md` §6 新增「协议与官方语义对齐（第三轮）」。
+
 ## v0.5.0 - 2026-09-24 (架构债清理 + 文档同步)
 
 对应提交 `0e7ed92`。详见 `docs/refactor_plan_v9.md` v9.1 节与 `docs/architecture.md` 架构债清理记录。

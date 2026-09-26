@@ -5,6 +5,7 @@ EPROM 可写集合 / 目标突变限幅 G3 / raw-rad 换算 / 无 SDK 时优雅�
 """
 import sys
 import os
+import inspect
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -12,8 +13,10 @@ from hardware.feetech_bus import (
     STS3215_TABLE, EPROM_WRITABLE, SIGN_BITS, BAUDRATE_TABLE, SCAN_BAUDRATES,
     GRIPPER_PROTECTION, MODEL_NUMBER_STS3215, RESOLUTION,
     STATUS_ERROR_FLAGS, CURRENT_MA_PER_STEP, VOLTAGE_V_PER_STEP,
+    DEFAULT_PID, DEFAULT_ACCELERATION, DEFAULT_MAXIMUM_ACCELERATION,
+    PHASE_FEEDBACK_MODE_BIT, PHASE_DIRECTION_BIT, GRIPPER_MOTOR_ID,
     FeetechBus, encode_sign_magnitude, decode_sign_magnitude,
-    decode_status_flags, decode_load,
+    decode_status_flags, decode_load, angle_zero, raw_to_rad, rad_to_raw,
 )
 
 
@@ -202,6 +205,55 @@ def test_arm_module_importable():
     print("  PASS: arm 模块可导入 + 常量回归")
 
 
+def test_angle_zero_semantics():
+    """角度零点 = 行程中点（lerobot DEGREES 官方语义），非 homing_offset"""
+    body = {"homing_offset": 2048, "range_min": 800, "range_max": 3200}
+    # 官方: mid = (min+max)/2 = 2000，而不是 homing_offset=2048
+    assert angle_zero(body) == 2000.0, angle_zero(body)
+    assert angle_zero(body, use_range_midpoint=False) == 2048.0
+    # 行程退化/缺失 → 回退 homing_offset
+    assert angle_zero({"homing_offset": 1900, "range_min": 5, "range_max": 5}) == 1900.0
+    assert angle_zero({"homing_offset": 1900}) == 1900.0
+    # 换算: 行程中点处角度为 0；公式与官方 (raw-mid)*360/(res-1) 一致
+    assert abs(raw_to_rad(2000, body)) < 1e-12
+    assert abs(np.rad2deg(raw_to_rad(2000 + 4095, body)) - 360.0) < 1e-9
+    mid_rad = raw_to_rad(2048, body)
+    assert abs(np.rad2deg(mid_rad) - (2048 - 2000) * 360.0 / 4095.0) < 1e-9
+    # 往返一致 + range 截断
+    for raw in (800, 1500, 2000, 2600, 3200):
+        assert rad_to_raw(raw_to_rad(raw, body), body) == raw, raw
+    assert rad_to_raw(np.deg2rad(1000.0), body) == 3200      # 上限截断
+    assert rad_to_raw(np.deg2rad(-1000.0), body) == 800      # 下限截断
+    # 夹爪语义保持: 用 homing_offset 为零点
+    grip = {"homing_offset": 1781, "range_min": 1495, "range_max": 2860}
+    assert raw_to_rad(1781, grip, use_range_midpoint=False) == 0.0
+    assert GRIPPER_MOTOR_ID == 6
+    print("  PASS: 零点=行程中点 + 退化回退 + 往返/截断 + 夹爪例外")
+
+
+def test_lerobot_parity_defaults():
+    """配置默认值与 lerobot 官方逐项对齐（防回退到 acceleration=16/漏写 PID）"""
+    assert DEFAULT_PID == {"P_Coefficient": 16, "I_Coefficient": 0,
+                           "D_Coefficient": 32}, DEFAULT_PID
+    assert DEFAULT_ACCELERATION == 254, DEFAULT_ACCELERATION
+    assert DEFAULT_MAXIMUM_ACCELERATION == 254, DEFAULT_MAXIMUM_ACCELERATION
+    assert STS3215_TABLE["Maximum_Acceleration"] == (85, 1)
+    assert PHASE_FEEDBACK_MODE_BIT == 0x10
+    assert PHASE_DIRECTION_BIT == 0x40
+    # configure 签名默认值（lerobot configure_motors 同款 + 方向对齐）
+    sig = inspect.signature(FeetechBus.configure)
+    assert sig.parameters["acceleration"].default == DEFAULT_ACCELERATION
+    assert sig.parameters["maximum_acceleration"].default == DEFAULT_MAXIMUM_ACCELERATION
+    assert sig.parameters["return_delay"].default == 0
+    assert sig.parameters["align_direction"].default is True
+    assert sig.parameters["position_mode"].default is True
+    src = inspect.getsource(FeetechBus.configure)
+    for token in ("Return_Delay_Time", "Maximum_Acceleration", "Acceleration",
+                  "Operating_Mode", "Phase", "PHASE_DIRECTION_BIT"):
+        assert token in src, f"configure 缺少 {token}"
+    print("  PASS: PID 16/0/32 + 加速度 254 + Phase bit4/bit6 对齐")
+
+
 if __name__ == "__main__":
     print("=" * 50)
     print("FeetechBus Protocol Layer Tests")
@@ -218,6 +270,8 @@ if __name__ == "__main__":
         ("diagnostic constants", test_diagnostic_constants),
         ("no-sdk graceful", test_no_sdk_graceful),
         ("arm module importable", test_arm_module_importable),
+        ("angle zero semantics (lerobot DEGREES)", test_angle_zero_semantics),
+        ("lerobot parity defaults", test_lerobot_parity_defaults),
     ]
     passed = 0
     for name, fn in tests:

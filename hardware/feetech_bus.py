@@ -113,6 +113,18 @@ GRIPPER_PROTECTION = {
     "Overload_Torque": 25,       # 过载时 25% 扭矩
 }
 
+#: 位置环 PID 默认值（lerobot SOFollowerConfig: position_{p,i,d}_coefficient）
+#: P=16 响应刚度、I=0 不积分（位置伺服内部闭环，无需外积分）、D=32 阻尼防超调
+DEFAULT_PID = {"P_Coefficient": 16, "I_Coefficient": 0, "D_Coefficient": 32}
+#: 加速度默认值（lerobot configure_motors: acceleration=254 / maximum_acceleration=254）
+#: 原实现写 16 会造成从臂加速迟滞、跟随滞后；官方取满值让梯形加减速不成为瓶颈
+DEFAULT_ACCELERATION = 254
+DEFAULT_MAXIMUM_ACCELERATION = 254
+
+#: Phase 寄存器(18) 位定义（STS3215）
+PHASE_FEEDBACK_MODE_BIT = 0x10   # bit4: 角度反馈模式位；置 1 时读数可溢出为负 —— lerobot 清除
+PHASE_DIRECTION_BIT = 0x40       # bit6: 编码器计数方向位；主从两臂不一致时该关节跟随反向
+
 #: Status 寄存器(65) 错误标志位（STS3215 手册；与社区实现 commanderfun/STS3215 一致）
 STATUS_ERROR_FLAGS = {0: "Voltage", 1: "Sensor", 2: "Temperature",
                       3: "Current", 5: "Overload"}
@@ -120,6 +132,50 @@ STATUS_ERROR_FLAGS = {0: "Voltage", 1: "Sensor", 2: "Temperature",
 CURRENT_MA_PER_STEP = 6.5
 #: Present_Voltage 单位: 0.1 V/step
 VOLTAGE_V_PER_STEP = 0.1
+
+#: 夹爪 ID —— 本实现夹爪沿用「标定中位点」为零点（0 rad = 夹爪闭合位，
+#: 见 GRIPPER_OPEN_PULSE/CLOSE 语义）；lerobot 官方夹爪用 RANGE_0_100 归一化，
+#: 两者是不同模式，此处保持既有臂语义（已记入 docs/pc_board_feetech_plan.md §6）。
+GRIPPER_MOTOR_ID = 6
+
+
+def angle_zero(calib_entry: Dict[str, object],
+               use_range_midpoint: bool = True) -> float:
+    """返回某关节的角度零点（原始值域）
+
+    lerobot ``MotorNormMode.DEGREES`` 官方语义（motors_bus._normalize/_unnormalize）::
+
+        mid = (range_min + range_max) / 2
+        deg = (raw - mid) * 360 / (resolution - 1)
+
+    即零点是【行程中点】，**不是** ``homing_offset``（标定手摆中位点）——两者物理上
+    并非同一位置。只有主从两臂都以各自行程中点为零点，同一物理姿态才对应同一角度值，
+    遥操作才不会出现恒定偏差（原实现用 homing_offset 做主从映射，是恒定偏差根因）。
+    行程缺失或退化（hi <= lo）时回退 homing_offset。
+    """
+    lo, hi = calib_entry.get("range_min"), calib_entry.get("range_max")
+    if use_range_midpoint and lo is not None and hi is not None and hi > lo:
+        return (float(lo) + float(hi)) / 2.0
+    return float(calib_entry["homing_offset"])
+
+
+def raw_to_rad(raw: float, calib_entry: Dict[str, object],
+               use_range_midpoint: bool = True,
+               resolution: int = RESOLUTION) -> float:
+    """原始值 → 弧度（lerobot DEGREES: deg = (raw - mid) * 360 / (resolution - 1)）"""
+    mid = angle_zero(calib_entry, use_range_midpoint)
+    return float(np.deg2rad((raw - mid) * 360.0 / (resolution - 1)))
+
+
+def rad_to_raw(rad: float, calib_entry: Dict[str, object],
+               use_range_midpoint: bool = True,
+               resolution: int = RESOLUTION) -> int:
+    """弧度 → 原始值（按 range_min/max 截断，防越界目标写入舵机）"""
+    mid = angle_zero(calib_entry, use_range_midpoint)
+    raw = int(np.rad2deg(rad) * (resolution - 1) / 360.0 + mid)
+    lo = int(calib_entry["range_min"])
+    hi = int(calib_entry["range_max"])
+    return max(lo, min(hi, raw))
 
 
 # ---------------------------------------------------------------------------
@@ -542,37 +598,60 @@ class FeetechBus:
     # ------------------------------------------------------------------
     def configure(self, gripper_id: Optional[int] = 6,
                   pid: Optional[Dict[str, int]] = None,
-                  acceleration: int = 16,
-                  return_delay: int = 0) -> None:
+                  acceleration: int = DEFAULT_ACCELERATION,
+                  maximum_acceleration: int = DEFAULT_MAXIMUM_ACCELERATION,
+                  return_delay: int = 0,
+                  position_mode: bool = True,
+                  align_direction: bool = True) -> None:
         """一次性写入推荐配置（在禁扭矩+解锁上下文中执行）
 
-        修复项:
-          - G2: STS3215 Phase 寄存器 bit4 清除 → 角度反馈强制 [0,4095]，防溢出为负
-          - G8: Operating_Mode 显式写 POSITION（防外部工具改过模式）
-          - G4: 夹爪防烧三参数（Max_Torque_Limit/Protection_Current/Overload_Torque）
-          - 修复原 arm.py 地址对调 Bug：Return_Delay_Time 实为 addr 7（原误写 0x29=
-            Acceleration），Acceleration 实为 addr 41（原误写 0x1A=CW_Dead_Zone）
+        与 lerobot 官方 SOFollower/SOLeader.configure 逐项对齐:
+          - `configure_motors(return_delay_time=0, maximum_acceleration=254,
+            acceleration=254)` → Return_Delay_Time / Maximum_Acceleration /
+            Acceleration 三项（原实现漏写 Maximum_Acceleration、加速度误用 16）
+          - `write("Operating_Mode", motor, POSITION)`（G8，防外部工具改过模式）
+          - `write("P/I/D_Coefficient", ...)` = 16/0/32（原实现仅在显式传 pid 时写）
+          - 夹爪防烧三参数（G4，仅 gripper）
+          - Phase bit4 清除（G2，lerobot 同款：角度反馈恒在 [0,4095]）
+        本实现额外增加（lerobot 未覆盖的硬件坑位）:
+          - Phase bit6 计数方向位对齐：两臂 bit6 不一致会导致该关节跟随反向，
+            清除后读数方向与参考臂一致（align_direction=False 可关）
 
         Args:
-            gripper_id: 夹爪舵机 ID（None 跳过防烧参数）
-            pid: 可选 {"P_Coefficient": p, "I_Coefficient": i, "D_Coefficient": d}
-            acceleration: 加速度（原 arm.py 意图值 16 = 平滑加速）
+            gripper_id: 夹爪舵机 ID（None 跳过防烧参数，如主臂）
+            pid: 覆盖默认 PID，如 {"P_Coefficient": p, ...}
+            acceleration: 加速度（默认 254 = lerobot 同款）
+            maximum_acceleration: 最大加速度上限（addr 85，默认 254）
             return_delay: 响应延迟（0 = 最小 2µs，lerobot 同款）
+            position_mode: 是否显式写 Operating_Mode=POSITION
+            align_direction: 是否清除 Phase bit6 对齐编码器计数方向
         """
         with self.torque_disabled():
             for mid in self.motor_ids:
                 self.write("Return_Delay_Time", mid, return_delay, num_retry=1)
-                # G2: STS3215 Phase bit4 → 位置读数落在 [0, resolution-1]
+                if "Maximum_Acceleration" in STS3215_TABLE:
+                    self.write("Maximum_Acceleration", mid, maximum_acceleration,
+                               num_retry=1)
+                self.write("Acceleration", mid, acceleration, num_retry=1)
+                # Phase: bit4 反馈模式（lerobot 同款）+ bit6 计数方向（本实现新增）
                 phase = self.read("Phase", mid, num_retry=1)
-                if phase & 0x10:
-                    self.write("Phase", mid, phase & ~0x10, num_retry=1)
+                fixed = phase
+                if phase & PHASE_FEEDBACK_MODE_BIT:
+                    fixed &= ~PHASE_FEEDBACK_MODE_BIT
                     logger.info("[%s] id=%d Phase bit4 已清除（防角度反馈溢出）",
                                 self.name, mid)
-                self.write("Operating_Mode", mid, MODE_POSITION, num_retry=1)
-                self.write("Acceleration", mid, acceleration, num_retry=1)
-                if pid:
-                    for key, val in pid.items():
-                        self.write(key, mid, val, num_retry=1)
+                if align_direction and (phase & PHASE_DIRECTION_BIT):
+                    fixed &= ~PHASE_DIRECTION_BIT
+                    logger.warning(
+                        "[%s] id=%d Phase bit6 已清除（0x%02X→0x%02X）：该关节原计数"
+                        "方向与参考臂相反，会导致跟随反向；清除后须重录本臂行程标定",
+                        self.name, mid, phase, fixed)
+                if fixed != phase:
+                    self.write("Phase", mid, fixed, num_retry=1)
+                if position_mode:
+                    self.write("Operating_Mode", mid, MODE_POSITION, num_retry=1)
+                for key, val in (pid or DEFAULT_PID).items():
+                    self.write(key, mid, val, num_retry=1)
             if gripper_id is not None and gripper_id in self.motor_ids:
                 for key, val in GRIPPER_PROTECTION.items():
                     self.write(key, gripper_id, val, num_retry=1)
