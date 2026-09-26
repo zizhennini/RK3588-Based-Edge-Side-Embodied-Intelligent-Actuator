@@ -101,8 +101,76 @@ def do_set_id(bus: FeetechBus, initial_id: int, target_id: int,
             pass
 
 
+def do_identify(ports: list, baud: int) -> int:
+    """识别每个串口连的是哪只臂（防 USB 重插后主从端口互换）
+
+    判据: Homing_Offset —— follower 标定时写过 EEPROM 偏移（非 0），leader 通常为 0。
+    同时打印当前读数与 Phase 方向位，便于确认两侧配置一致。
+    """
+    found = 0
+    for port in ports:
+        bus = FeetechBus(port, baud=baud, name="ident")
+        try:
+            bus.connect(handshake=False)
+        except Exception as e:
+            print(f"{port}: 打开失败 ({e})")
+            continue
+        try:
+            offs, phases = {}, {}
+            for mid in bus.motor_ids:
+                offs[mid] = int(bus.read("Homing_Offset", mid, num_retry=1))
+                phases[mid] = bus.read("Phase", mid, num_retry=1)
+            pos = bus.sync_read("Present_Position", num_retry=2)
+            guess = ("follower（已写 EEPROM 偏移）" if any(offs.values())
+                     else "leader（偏移全 0，未写过 EEPROM）")
+            print(f"\n{port}: {len(pos)}/6 舵机响应 → 疑似 {guess}")
+            print(f"  Homing_Offset: {offs}")
+            print("  Phase: " + " ".join(f"id{k}=0x{v:02X}"
+                                       for k, v in sorted(phases.items())))
+            print(f"  Present_Position: {dict(sorted(pos.items()))}")
+            high = [k for k, v in phases.items() if v & 0x40]
+            if high:
+                print(f"  ⚠ Phase bit6 置位（计数方向可能反向）: {high} —— 建议重跑 configure")
+            found += 1
+        finally:
+            bus.disconnect(disable_torque=False)
+    if found == 0:
+        print("未识别到任何臂（检查 USB 连接/供电）")
+        return 1
+    return 0
+
+
+def do_release(ports: list, baud: int) -> int:
+    """释放扭矩（松臂巡视模式）: 对每个端口禁扭矩+解锁，进程退出后舵机不再锁死
+
+    用途: 程序异常退出后舵机仍保持 Torque_Enable=1（串口关闭不会自动断扭矩），
+    此模式把两侧（或指定端口）全部舵机置为自由状态。
+    """
+    done = 0
+    for port in ports:
+        bus = FeetechBus(port, baud=baud, name="release")
+        try:
+            bus.connect(handshake=False)
+        except Exception as e:
+            print(f"{port}: 打开失败 ({e})")
+            continue
+        try:
+            bus.disable_torque()
+            tq = {mid: bus.read("Torque_Enable", mid, num_retry=1)
+                  for mid in bus.motor_ids}
+            free = [m for m, v in tq.items() if v == 0]
+            print(f"{port}: 扭矩已释放 {len(free)}/6 {tq}")
+            done += 1
+        finally:
+            bus.disconnect(disable_torque=False)
+    if done == 0:
+        print("未找到可用端口")
+        return 1
+    return 0
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Feetech 总线扫描/出厂初始化")
+    parser = argparse.ArgumentParser(description="Feetech 总线扫描/出厂初始化/端口识别/松臂")
     parser.add_argument("--port", default="/dev/ttyACM0")
     parser.add_argument("--baud", type=int, default=1_000_000)
     parser.add_argument("--scan-all", action="store_true", help="全波特率扫描")
@@ -110,7 +178,21 @@ def main() -> int:
     parser.add_argument("--initial-id", type=int, default=1)
     parser.add_argument("--target-id", type=int)
     parser.add_argument("--target-baud", type=int, default=1_000_000)
+    parser.add_argument("--identify", action="store_true",
+                        help="识别 /dev/ttyACM*/ttyUSB* 各端口对应哪只臂（主从判别）")
+    parser.add_argument("--release-all", action="store_true",
+                        help="对所有 /dev/ttyACM*/ttyUSB* 端口释放扭矩（松臂，防锁死）")
     args = parser.parse_args()
+
+    if args.identify or args.release_all:
+        import glob
+        ports = sorted(glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*"))
+        if not ports:
+            print("未发现任何 /dev/ttyACM* 或 /dev/ttyUSB* 设备")
+            return 1
+        if args.release_all:
+            return do_release(ports, args.baud)
+        return do_identify(ports, args.baud)
 
     bus = FeetechBus(args.port, baud=args.baud, name="scan")
     if args.set_id:

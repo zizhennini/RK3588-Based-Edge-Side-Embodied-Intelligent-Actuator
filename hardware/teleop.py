@@ -99,13 +99,19 @@ class TeleopPair:
         self._last_cmd: Optional[np.ndarray] = None
 
     def start(self) -> None:
-        self.follower.connect(handshake=self.handshake)
-        self.leader.connect(handshake=self.handshake)
-        # 首帧对齐: 从臂插值平滑移动到主臂当前姿态（防起步突跳）
-        joints = self._read_leader_filtered()
-        if joints is not None:
-            self._smooth_goto(joints)
-            self._last_cmd = joints.copy()
+        try:
+            self.follower.connect(handshake=self.handshake)
+            self.leader.connect(handshake=self.handshake)
+            # 首帧对齐: 从臂插值平滑移动到主臂当前姿态（防起步突跳）
+            joints = self._read_leader_filtered()
+            if joints is not None:
+                self._smooth_goto(joints)
+                self._last_cmd = joints.copy()
+        except Exception:
+            # 半连接失败必须清理：否则从臂会停在扭矩开启状态（进程退出后舵机仍锁死）
+            logger.error("TeleopPair 启动失败，正在关闭两侧并释放扭矩")
+            self.stop()
+            raise
         logger.info("TeleopPair 就绪: leader→follower @ %dHz, 限幅 %.1f°/帧",
                     self.fps,
                     float(np.rad2deg(self.max_step_rad)) if self.max_step_rad else -1)

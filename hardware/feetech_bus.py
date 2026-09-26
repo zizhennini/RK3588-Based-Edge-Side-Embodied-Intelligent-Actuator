@@ -585,13 +585,20 @@ class FeetechBus:
             self.write("Lock", mid, 0, num_retry=1)
 
     @contextmanager
-    def torque_disabled(self, motor_ids: Optional[Sequence[int]] = None):
-        """上下文管理器：保证退出时恢复扭矩（配置/标定安全包裹）"""
+    def torque_disabled(self, motor_ids: Optional[Sequence[int]] = None,
+                        enable_on_exit: bool = True):
+        """上下文管理器：保证退出时恢复扭矩（配置/标定安全包裹）
+
+        Args:
+            enable_on_exit: False 时退出后**保持禁扭矩**——标定/手搬场景用
+                （lerobot 标定流程结束即禁扭矩；主臂必须保持可手搬）
+        """
         self.disable_torque(motor_ids)
         try:
             yield
         finally:
-            self.enable_torque(motor_ids)
+            if enable_on_exit:
+                self.enable_torque(motor_ids)
 
     # ------------------------------------------------------------------
     # 推荐配置（G2/G4/G8 + Return_Delay 地址 Bug 修复）
