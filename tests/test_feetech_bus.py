@@ -254,6 +254,24 @@ def test_lerobot_parity_defaults():
     print("  PASS: PID 16/0/32 + 加速度 254 + Phase bit4/bit6 对齐")
 
 
+def test_eeprom_offset_cumulative():
+    """Homing_Offset 写入必须累加（防重标定写坏已偏移臂的坐标系）"""
+    from tools.calibrate_arm import eeprom_offset_update, HALF_TURN
+    assert HALF_TURN == 2047
+    # 首次标定（舵机偏移 0）: new = mid_raw - 2047（与旧实现一致）
+    assert eeprom_offset_update(0, 2077) == 30
+    assert eeprom_offset_update(0, 1957) == -90
+    # 已写过偏移再标定: 同一姿态重标 → 偏移不变（幂等）
+    assert eeprom_offset_update(30, 2047) == 30
+    # 换姿态重标: 累加到现有偏移上
+    assert eeprom_offset_update(30, 2147) == 130
+    # 语义校验: 写入前后读数关系 reading_new = reading_old - (new - old)
+    for old, mid_raw in ((0, 2077), (30, 2047), (-90, 1957), (500, 1800)):
+        new = eeprom_offset_update(old, mid_raw)
+        assert mid_raw - (new - old) == HALF_TURN, (old, mid_raw, new)
+    print("  PASS: 偏移累加 + 幂等 + 读数语义")
+
+
 if __name__ == "__main__":
     print("=" * 50)
     print("FeetechBus Protocol Layer Tests")
@@ -272,6 +290,7 @@ if __name__ == "__main__":
         ("arm module importable", test_arm_module_importable),
         ("angle zero semantics (lerobot DEGREES)", test_angle_zero_semantics),
         ("lerobot parity defaults", test_lerobot_parity_defaults),
+        ("eeprom offset cumulative", test_eeprom_offset_cumulative),
     ]
     passed = 0
     for name, fn in tests:

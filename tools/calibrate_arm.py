@@ -48,6 +48,23 @@ logger = logging.getLogger("calibrate_arm")
 
 HALF_TURN = RESOLUTION // 2 - 1  # 2047: lerobot 同款半圈中点
 POLL_HZ = 30
+
+
+def eeprom_offset_update(old_offset: int, mid_raw: int,
+                         half_turn: int = HALF_TURN) -> int:
+    """计算要写入舵机的新 Homing_Offset（**累加**语义）
+
+    舵机语义 ``Present_Position = 实际位置 - Homing_Offset``。要让当前中位姿态读数为
+    ``half_turn``，绝对偏移必须是【舵机现有偏移 + 本次坐标平移量】::
+
+        new = old + (mid_raw - half_turn)
+
+    直接用 ``mid_raw - half_turn`` 覆盖只在 ``old == 0``（从未写过偏移）时正确；
+    对已经写过偏移的臂会把中位读成 ``old + half_turn``，整个坐标系错位。
+    """
+    return int(old_offset) + (int(mid_raw) - int(half_turn))
+
+
 JOINT_LABELS = {
     1: "shoulder_pan (底座旋转)",
     2: "shoulder_lift (大臂俯仰)",
@@ -193,20 +210,42 @@ def main() -> int:
                       f"range=[{lo}, {hi}] span={hi - lo} "
                       f"角度零点(行程中点)={(lo + hi) / 2:.1f}")
 
+            # 夹爪(6) 零点保持既有约定（0 rad = 夹爪闭合位）：重标定时沿用旧 JSON 的
+            # homing_offset，避免因中位姿态摆放差异导致夹爪角度语义漂移
+            out_path_obj = Path(args.output)
+            if out_path_obj.exists():
+                try:
+                    with open(out_path_obj, "r", encoding="utf-8") as f:
+                        old = json.load(f)
+                    if "6" in old and "homing_offset" in old["6"]:
+                        keep = int(old["6"]["homing_offset"])
+                        if calibration["6"]["homing_offset"] != keep:
+                            print(f"    夹爪零点沿用旧标定 homing_offset={keep}"
+                                  f"（本次中位读数 {calibration['6']['homing_offset']} 仅存档）")
+                        calibration["6"]["homing_offset"] = keep
+                except Exception as e:
+                    logger.warning("读取旧标定失败（夹爪零点沿用规则跳过）: %s", e)
+
             # ---- 步骤 4: 可选写 EEPROM ----
             if args.write_eeprom:
                 print("\n>>> 写入舵机 EEPROM（Homing_Offset/Min/Max_Position_Limit）...")
                 eeprom_calib = {}
                 for mid in bus.motor_ids:
                     c = calibration[str(mid)]
-                    # 半圈归零: 让当前位置(中位)读数为 2047
-                    offset = c["homing_offset"] - HALF_TURN
-                    shift = offset  # 写入后读数 raw' = raw - offset
+                    # 舵机语义: Present_Position = 实际位置 - Homing_Offset。
+                    # delta = 本次坐标平移量（写入后读数 = 写入前读数 - delta），
+                    # 新偏移必须【累加】到舵机现有偏移上——follower 此前已写过偏移，
+                    # 早先实现直接用 delta 覆盖，会把中位读成 O_old+2047（坐标系写坏）。
+                    old_offset = int(bus.read("Homing_Offset", mid, num_retry=1))
+                    delta = c["homing_offset"] - HALF_TURN
+                    new_offset = eeprom_offset_update(old_offset, c["homing_offset"])
                     eeprom_calib[mid] = {
-                        "homing_offset": offset,  # write_calibration 内做 sign 编码
-                        "range_min": max(0, c["range_min"] - shift),
-                        "range_max": min(RESOLUTION - 1, c["range_max"] - shift),
+                        "homing_offset": new_offset,  # write_calibration 内做 sign 编码
+                        "range_min": max(0, c["range_min"] - delta),
+                        "range_max": min(RESOLUTION - 1, c["range_max"] - delta),
                     }
+                    if old_offset:
+                        print(f"    id{mid}: 现有偏移 {old_offset} → 累加后 {new_offset}")
                 bus.write_calibration(eeprom_calib)
                 # JSON 切换到偏移后的新坐标系（读数中位=2047）
                 for mid in bus.motor_ids:
