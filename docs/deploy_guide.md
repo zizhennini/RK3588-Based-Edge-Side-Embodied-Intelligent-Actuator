@@ -194,16 +194,65 @@ python3 scripts/calibrate_extrinsics.py
 
 # 手眼标定辅助
 python3 scripts/calibrate_handeye.py
-
-# 舵机标定参数: config/calibration.json（SO101Arm 启动时加载）
 ```
 
 > 标定脚本只回写 `config/settings.py`（单一事实来源）；
 > `hardware/arm.py`、`policy/grasp_pipeline.py` 均引用 settings，无需手工同步副本。
 
+### 6.1 串口端口稳定命名（udev，一次性，板端 root）
+
+断电重启/重新插拔后 `ttyACM0/ttyACM1` 会按枚举顺序重新分配，导致主从臂端口互换
+（标定与跟随串臂）。用 udev 按 **USB 序列号** 绑定固定软链：
+
+```bash
+sudo cp config/99-so101.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+ls -l /dev/so101_*        # so101_leader / so101_follower（未出现则两臂 USB 各重插一次）
+```
+
+代码侧 `hardware/feetech_bus.resolve_port()` 优先使用 `/dev/so101_{leader,follower}`，
+软链缺失时自动回退 `ttyACM` 编号（零破坏）。`python3 tools/feetech_scan.py --identify`
+会打印每个端口的稳定路径便于核对；换适配器时改 rules 里的 `ATTRS{serial}` 即可。
+
+### 6.2 机械臂关节标定（tools/calibrate_arm.py）
+
+流程与 lerobot 标定三部曲对齐（中位归零 → 行程录制 → 写限位）：
+
+```bash
+# ① 从臂（follower）→ config/calibration.json
+python3 tools/calibrate_arm.py --port /dev/so101_follower --output config/calibration.json
+# ② 主臂（leader）→ config/calibration_leader.json
+python3 tools/calibrate_arm.py --port /dev/so101_leader --output config/calibration_leader.json
+# ③ 主从零点对齐检查（只读，两臂摆同一姿态后运行；体关节差 <5° 为合格）
+python3 tools/teleop_check.py
+```
+
+交互两步（**顺序与含义不能弄错**）：
+1. **中位姿态**：每个关节摆到**机械行程正中间**（底座朝前、大臂竖直向上、小臂水平向前、
+   腕水平、夹爪半开）→ Enter。向导随即把 `Homing_Offset` 写入 EEPROM 使中位读数 = 2047
+   ——这是行程录制不跨越 0/4095 绕回点的**前提**（lerobot `set_half_turn_homings` 同款）。
+2. **行程录制**：把每个关节推到**机械行程两端到底**（夹爪开合数次）→ Enter。
+   行程中点即角度零点（lerobot `MotorNormMode.DEGREES` 语义），所以两端都要推到位。
+
+向导内置三道保护：跨 0/4095 边界检测（命中即中止、不写限位、不保存）、中位姿态质量自检
+（中点偏差 >150 步告警）、`--verify` 读回 EEPROM 校验（±2）。标定结束**保持禁扭矩**
+（lerobot 同款，主臂必须可手搬）。
+
+```bash
+# 故障处置
+python3 tools/calibrate_arm.py --port /dev/so101_follower --reset-eeprom  # 清错误偏移/限位
+python3 tools/feetech_scan.py --release-all                              # 程序异常退出后松臂
+python3 tools/feetech_scan.py --identify                                 # 端口角色/偏移/Phase 自查
+```
+
+> 已知语义差异：夹爪（id6）零点沿用 `homing_offset`（0 rad = 闭合位，配合
+> `GRIPPER_OPEN/CLOSE_PULSE`），lerobot 官方夹爪走 `RANGE_0_100` 归一化，两者是不同模式。
+
 ## 7. 单元测试
 
 ```bash
 python3 tests/test_kinematics.py      # 运动学 FK/IK 一致性（6 用例，仅 numpy）
+python3 tests/test_feetech_bus.py     # Feetech 协议层（14 用例：控制表/符号编码/零点语义/
+                                      # 官方参数对齐/EEPROM 偏移累加/G3 限幅，PC 与板端均可跑）
 python3 runtime/shared_frame.py       # 共享内存帧缓冲自检
 ```

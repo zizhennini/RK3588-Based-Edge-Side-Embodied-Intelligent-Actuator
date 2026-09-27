@@ -1,5 +1,37 @@
 # 开发日志 (CHANGELOG)
 
+## 标定链路修复 + 主从跟随实测闭环（2026-09-27）
+
+无限时主从跟随实测暴露三个问题，全部修复并真机验证通过（提交 `e2461f6`、`c7f450e`）。
+
+### 修复
+- **标定行程失真（最严重）**: 向导旧顺序"先录行程、后写 EEPROM"未先做半圈归零，读数跨越
+  0/4095 绕回点 → min/max 录成假行程（实测 span 4083~4095，真值 ~2700）。改为 lerobot
+  官方顺序：**中位姿态 → 立即写 `Homing_Offset`（读数=2047）→ 再录行程 → 写限位**
+- **标定结束舵机锁死**: `torque_disabled()` 退出时自动 `enable_torque`；新增
+  `enable_on_exit=False`，标定结束保持禁扭矩（lerobot 同款，主臂必须可手搬）
+- **半连接失败残留锁死**: `TeleopPair.start()` 清理两侧并释放扭矩
+- **断电/重插后主从端口互换**: 新增 `config/99-so101.rules`（按 USB 序列号绑定
+  `/dev/so101_leader`、`/dev/so101_follower`）+ `feetech_bus.resolve_port()` 优先稳定软链、
+  缺失回退 ttyACM 编号；`TeleopPair`/`record-lite`/`teleop_check` 全部接入
+- **EEPROM 偏移累加语义**: 已写过偏移的臂重标时必须 `new = old + (mid_raw − 2047)`，
+  原实现直接覆盖会把中位读成 `old + 2047`、坐标系整体错位（提取纯函数 + 单测锁定）
+
+### 新增（保护与可观测）
+- 标定向导三道保护：**跨 0/4095 边界检测**（命中即中止、不写限位、不保存）、
+  **中位姿态质量自检**（行程中点偏差 >150 步告警）、`--reset-eeprom` 复位模式
+- `tools/teleop_check.py`：主从零点对齐检查（只读，逐关节角度差，把"对不上"变成数字）
+- `tools/feetech_scan.py --identify / --release-all`：端口角色判别 + 异常退出后松臂
+- `hardware/teleop.py run(--log-follower)`：逐帧读回从臂实际角度，结束打印**追踪误差**
+- 单测 13 → 14（`eeprom offset cumulative`）
+
+### 真机实测
+- 两臂标定：中位读数 2047/2048、行程 span 2170~2717、无跨边界告警；两臂零点偏差 ≤5.7°
+- 零点对齐检查：体关节最大偏差 **4.7°** ✓
+- **无限时跟随：3593 帧 / 120.2 秒 / 29.9 fps（目标 30），零异常** ✓
+- 文档：`docs/deploy_guide.md` §6.1/§6.2（udev 端口稳定 + 标定流程）、
+  `docs/pc_board_feetech_plan.md` §6 第四轮
+
 ## 协议与 lerobot 官方语义对齐（2026-09-25）
 
 起因：无限时主从跟随实测「轨迹对不上 + 恒定偏差 + 部分关节反向」。逐行对照

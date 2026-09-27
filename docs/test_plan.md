@@ -285,7 +285,7 @@
 
 | 编号 | 测试项 | 测试步骤 | 预期 | 涉及模块 | 状态 |
 |------|--------|---------|------|---------|------|
-| P1.1 | 遥操作录制 | 板端自研工具链：标定 `tools/calibrate_arm.py --port /dev/ttyACM0`；跟随录制 `scripts/lerobot-record-lite --follow`（hardware.teleop.TeleopPair：30Hz leader→follower + G3 限幅 + 起步平滑对齐）或只录不跟随（默认，纯 pyserial）；录制 JSON 传 PC 后 `scripts/json_to_lerobot.py --format npz|lerobot` 转换（lerobot 0.4.4 env 已验收）；总线排查 `tools/feetech_scan.py --port ... [--scan-all]`；PC 端带硬件时亦可 `scripts/teleop_record.py`（需 pip lerobot>=0.6） | 拖拽主臂 15 秒，从臂跟随，生成 JSON | M1 | ⬜ |
+| P1.1 | 遥操作录制 | 板端自研工具链：端口稳定（`config/99-so101.rules` → `/dev/so101_leader`/`so101_follower`）；标定 `tools/calibrate_arm.py --port /dev/so101_follower`；**零点对齐检查 `tools/teleop_check.py`（两臂同姿态，体关节差 <5°）**；跟随录制 `scripts/lerobot-record-lite --follow [--episode_time_s 0 无限时] [--log-follower 打印追踪误差]`（hardware.teleop.TeleopPair：30Hz leader→follower + G3 限幅 + 起步平滑对齐）或只录不跟随（默认，纯 pyserial）；录制 JSON 传 PC 后 `scripts/json_to_lerobot.py --format npz\|lerobot` 转换（lerobot 0.4.4 env 已验收）；总线排查/松臂 `tools/feetech_scan.py --identify\|--release-all`；PC 端带硬件时亦可 `scripts/teleop_record.py`（需 pip lerobot>=0.6） | 拖拽主臂 15 秒，从臂跟随（实测 3593 帧/120.2s/29.9fps ✓），生成 JSON | M1 | 🔶 实测通过（2026-09-27） |
 | P1.2 | 平滑处理 | `python3 scripts/develop_motion.py greeting --no_record` | 处理 raw 文件→smoothed | M3.2 | ⬜ |
 | P1.3 | 回放验证 | `python3 scripts/replay_traj.py motion_library/greeting_01.json --port /dev/ttyACM0` | 从臂执行轨迹 | M3.3, M1 | ⬜ |
 | P1.4 | 语音触发回放 | 运行 `va.py listen-forever`，说"你好" | 关键词匹配→回放 greeting | M2 | ⬜ |

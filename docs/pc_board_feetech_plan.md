@@ -237,3 +237,31 @@ lerobot `feetech.py`（configure_motors/write_calibration/_get_half_turn_homings
 零点推导降级为「EEPROM 归零一致性」可选步骤（角度换算不再依赖它）。
 
 **真机验证**：板端单测 13/13 通过（新增 `angle zero semantics` / `lerobot parity defaults`）。
+
+### 标定链路与主从跟随实测闭环（第四轮，2026-09-27）
+
+第三轮修复后实机联调暴露三个新问题，均已修复并**真机验证通过**：
+
+| # | 问题 | 根因 | 修复 |
+|---|---|---|---|
+| 1 | 行程录成 span 4070~4095（真值 ~2700）= 废数据 | 向导旧顺序是"先录行程、后写 EEPROM"，未先做半圈归零 → 读数跨越 0/4095 绕回点，min/max 必然失真（本向导最严重缺陷） | 顺序改为 lerobot 官方：**中位姿态 → 立即写 `Homing_Offset`（读数=2047）→ 再录行程 → 写限位**；新增**跨边界检测**（相邻采样 >3300↔<800 跳变判定绕回）命中即中止、不写限位、不保存；新增**中位姿态质量自检**（行程中点偏差 >150 步 ≈13° 告警） |
+| 2 | 标定结束舵机仍锁死 | `torque_disabled()` 退出时自动 `enable_torque`（lerobot 标定结束是禁扭矩的） | 新增 `enable_on_exit=False`，标定结束保持禁扭矩（主臂必须可手搬） |
+| 3 | 断电/重插后 leader/follower 端口互换 | USB 串口按枚举顺序分配 ttyACM 编号，顺序不定 | `config/99-so101.rules` 按 USB 序列号绑定 `/dev/so101_leader`、`/dev/so101_follower`；`feetech_bus.resolve_port()` 优先稳定软链、缺失回退 ttyACM 编号（零破坏）；identify 打印稳定路径 |
+
+**新增工具（运维/质量）**：
+- `tools/teleop_check.py`：主从零点对齐检查（只读）。把"感觉对不上"变成数字——两臂摆同一
+  姿态后打印逐关节角度差，<5° 合格；恒定偏差→两臂标定中位姿态不一致；>90°/反向→计数方向问题
+- `tools/feetech_scan.py --identify`：端口角色判别（Homing_Offset/Phase/读数/稳定路径）
+- `tools/feetech_scan.py --release-all`：异常退出后一键松臂（舵机 `Torque_Enable` 不会因串口
+  关闭自动复位，这是"锁死"的机制性原因）
+- `tools/calibrate_arm.py --reset-eeprom`：清错误偏移、限位恢复 0/4095（偏移写歪时读数被压到
+  0/4095 边界，行程录制必然失真，必须先复位）
+- `lerobot-record-lite --follow --log-follower`：逐帧读回从臂实际角度并打印**追踪误差**
+- `TeleopPair.start()` 失败清理：半连接失败不再让从臂停在扭矩开启状态
+
+**真机实测结论（2026-09-27）**：
+- 两臂标定：写入后中位读数全部 2047/2048，行程 span 2170~2717（id5 全圈 4095），无跨边界告警；
+  两臂行程中点（角度零点）偏差 ≤65 步 ≈5.7°
+- 零点对齐检查（两臂摆同一姿态）：体关节最大偏差 **4.7°** ✓
+- 无限时跟随：**3593 帧 / 120.2 秒 / 实测 29.9 fps（目标 30）**，零串口自恢复、零异常
+- 板端单测 14/14（新增 `eeprom offset cumulative`）
