@@ -1,5 +1,30 @@
 # 开发日志 (CHANGELOG)
 
+## M1 数据采集流程落地（2026-09-27）
+
+### 新增
+- **`tools/collect_episodes.py`**：M1 采集 CLI（板端）。一次连接多集连采；命名规范
+  `data/raw/<task>/episode_XXXX.json` + 会话 `manifest.json`；每条自动质量门控，
+  不合格提示重录/强制保留/退出；`--start-index` 支持断点续采；Ctrl-C 安全退出并打印汇总
+- **`tools/episode_quality.py`**：质量校验与统计**纯函数**层（采集与统计共用、可单测）。
+  四道门控：帧率（≥目标×0.90）、丢帧（>1.5×周期占比 ≤1%）、追踪误差（体关节 J1-J5 平均
+  ≤5°；夹爪单独报告不参与门控）、时长（≥请求×0.95）；另含无效帧统计、帧间隔统计、
+  逐关节分布、追踪汇总、Markdown 报告渲染
+- **`tools/dataset_stats.py`**：数据集统计与体检 CLI。条数/合格数、总帧数时长、帧率、
+  逐关节 min/max/幅度/均值/追踪误差、**标定行程覆盖率**（<30% 提示数据多样性不足）、
+  不合格条目原因列表；可落盘 `dataset_stats.json` + `dataset_report.md`；`--all-tasks` 多任务
+- **`scripts/json_to_lerobot.py --input-dir/--summary`**：批量转换模式（按 episode 序号排序、
+  自动跳过 manifest.json、逐文件成败/帧数汇总），兼容原有位置参数用法
+- **`tests/test_episode_quality.py`**：9 用例（四道门控正反例、无效帧、帧间隔、数据集汇总、
+  阈值覆盖、报告渲染），板端 9/9 通过
+- `.gitignore` 增加 `data/raw/`、`episodes/`、`datasets/`、`record_*.json` 等数据产物规则
+
+### 验证
+- 板端单测：`test_episode_quality.py` 9/9 + `test_feetech_bus.py` 14/14
+- **端到端干跑**（合成 3×10s episode，无硬件）：统计报表（含标定覆盖率体检）+ 批量转换
+  npz + `conversion_summary.json` 全部正确
+- 文档：`docs/deploy_guide.md` §8（数据规范/采集/统计/转换/数据流验收）
+
 ## 标定链路修复 + 主从跟随实测闭环（2026-09-27）
 
 无限时主从跟随实测暴露三个问题，全部修复并真机验证通过（提交 `e2461f6`、`c7f450e`）。

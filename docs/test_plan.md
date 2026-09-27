@@ -341,8 +341,11 @@
 
 | 步骤 | 操作 | 预期 | 涉及模块 |
 |------|------|------|---------|
-| 1 | `python3 scripts/teleop_record.py --episode_time_s 15`（或 lerobot-record-lite） | 拖拽主臂追帧录制 | P1.1, M1 |
-| 2 | 检查生成的 JSON 文件 | 包含 frames 和 joints 数据 | P1.1 |
+| 1 | `python3 tools/collect_episodes.py --task pick_place --episodes 50 --episode-time 20` | 逐条采集：质量门控通过后落盘 `data/raw/pick_place/episode_XXXX.json`，不合格提示重录 | P1.1, M1 |
+| 2 | `python3 tools/dataset_stats.py data/raw/pick_place --calib config/calibration.json --md dataset_report.md` | 合格数/帧率/丢帧/逐关节幅度/追踪误差/标定覆盖率报告中无 ⚠ | P1.1, M1 |
+| 3 | `python3 scripts/json_to_lerobot.py --input-dir data/raw/pick_place --format npz --out episodes/pick_place --summary conversion_summary.json` | 逐条 npz + 汇总 JSON，无 failed | P1.1, M1 |
+| 4 | （PC）`--format lerobot --repo-id ... --task ...` | LeRobotDataset 生成可被 M2 训练读取 | P1.1, M2 |
+| 备用 | `python3 scripts/lerobot-record-lite --follow --episode_time_s 0`（单条无限时，Ctrl-C 保存） | 手动手感验证/异常复现 | P1.1 |
 | 3 | `python3 scripts/develop_motion.py <name> --no_record` | 平滑处理+入库 | M3.2 |
 | 4 | `python3 scripts/record_trajectory.py list` | 动作库中可见新动作 | M3.1 |
 | 5 | `python3 scripts/replay_traj.py ...` 或说动作名 | 从臂执行 | M3.3 |

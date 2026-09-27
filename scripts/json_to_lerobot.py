@@ -18,10 +18,20 @@
         --format lerobot --repo-id local/so101_teleop --task "拿起杯子" \
         --root ~/datasets/so101_teleop
 
+M1 批量模式（推荐，配合 tools/collect_episodes.py 的 data/raw/<task>/ 目录）:
+    # 单任务目录，按 episode 序号排序全部转换（自动跳过 manifest.json）
+    python scripts/json_to_lerobot.py --input-dir data/raw/pick_place \
+        --format npz --out episodes/pick_place
+    # 转 LeRobotDataset 并产出转换汇总 conversion_summary.json
+    python scripts/json_to_lerobot.py --input-dir data/raw/pick_place \
+        --format lerobot --repo-id local/so101_pick_place --task "拿起方块" \
+        --root ~/datasets/so101_pick_place --summary conversion_summary.json
+
 注: 板端零依赖此脚本（数据流: 板端录制 JSON → rsync → PC 端转换 → 训练）。
 """
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -29,6 +39,24 @@ import numpy as np
 
 JOINT_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex",
                "wrist_flex", "wrist_roll", "gripper"]
+
+
+def episode_sort_key(path: Path):
+    """eisode_0007.json → 7（无序号文件按文件名排序）"""
+    m = re.search(r"(\d+)", path.stem)
+    return (0, int(m.group(1)), path.name) if m else (1, 0, path.name)
+
+
+def collect_inputs(inputs: list, input_dir: str) -> list:
+    """汇总输入文件：--input-dir 目录（按序号排序、跳过 manifest）优先于位置参数"""
+    if input_dir:
+        d = Path(input_dir)
+        if not d.is_dir():
+            raise NotADirectoryError(f"--input-dir 不是目录: {d}")
+        files = [p for p in d.glob("*.json")
+                 if p.name not in ("manifest.json", "conversion_summary.json")]
+        return sorted(files, key=episode_sort_key)
+    return [Path(p) for p in inputs]
 
 
 def load_episode(path: Path) -> dict:
@@ -123,7 +151,10 @@ def save_lerobot(episodes: list, repo_id: str, task: str, root: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="遥操作录制 JSON → 训练数据")
-    parser.add_argument("inputs", nargs="+", help="录制 JSON 文件（可多个=多 episode）")
+    parser.add_argument("inputs", nargs="*", help="录制 JSON 文件（可多个=多 episode）")
+    parser.add_argument("--input-dir", default=None,
+                        help="批量模式: 目录内全部 episode_*.json 按序号排序转换"
+                             "（自动跳过 manifest.json）")
     parser.add_argument("--format", choices=["npz", "lerobot"], default="npz")
     parser.add_argument("--out", default="episodes", help="npz 输出目录")
     parser.add_argument("--repo-id", default="local/so101_teleop",
@@ -131,26 +162,66 @@ def main() -> int:
     parser.add_argument("--task", default="teleop recording",
                         help="lerobot task 描述")
     parser.add_argument("--root", default=None, help="lerobot dataset root")
+    parser.add_argument("--summary", default=None,
+                        help="转换汇总 JSON 输出路径（含逐文件成败/帧数）")
     args = parser.parse_args()
 
-    episodes = []
-    for p in args.inputs:
+    if not args.inputs and not args.input_dir:
+        parser.error("需要位置参数（JSON 文件）或 --input-dir")
+
+    try:
+        files = collect_inputs(args.inputs, args.input_dir)
+    except NotADirectoryError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 1
+    if not files:
+        print(f"✗ 无输入文件（--input-dir={args.input_dir}）", file=sys.stderr)
+        return 1
+
+    episodes, records = [], []
+    for p in files:
         try:
-            episodes.append(load_episode(Path(p)))
+            ep = load_episode(Path(p))
+            episodes.append(ep)
+            records.append({"file": p.name, "status": "ok",
+                            "frames": int(len(ep["state"])),
+                            "duration_s": round(float(ep["timestamps"][-1]), 3)
+                            if len(ep["timestamps"]) else 0.0})
         except Exception as e:
             print(f"✗ 跳过 {p}: {e}", file=sys.stderr)
+            records.append({"file": Path(p).name, "status": "failed",
+                            "error": str(e)})
     if not episodes:
         print("无有效输入", file=sys.stderr)
         return 1
 
     total = sum(len(ep["state"]) for ep in episodes)
-    print(f"载入 {len(episodes)} 个 episode，共 {total} 帧")
+    print(f"载入 {len(episodes)}/{len(files)} 个 episode，共 {total} 帧")
 
     if args.format == "npz":
         save_npz(episodes, Path(args.out))
     else:
         root = Path(args.root or f"./datasets/{args.repo_id.split('/')[-1]}")
         save_lerobot(episodes, args.repo_id, args.task, root)
+
+    if args.summary:
+        summary = {
+            "format": args.format,
+            "task": args.task,
+            "input_dir": args.input_dir,
+            "repo_id": args.repo_id if args.format == "lerobot" else None,
+            "root": str(args.root or (f"./datasets/{args.repo_id.split('/')[-1]}"
+                                      if args.format == "lerobot" else args.out)),
+            "episodes_ok": len(episodes),
+            "episodes_failed": len(files) - len(episodes),
+            "total_frames": total,
+            "files": records,
+        }
+        sp = Path(args.summary)
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        with open(sp, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, ensure_ascii=False)
+        print(f"✓ 转换汇总: {sp.resolve()}")
     return 0
 
 

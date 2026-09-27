@@ -254,5 +254,73 @@ python3 tools/feetech_scan.py --identify                                 # 端�
 python3 tests/test_kinematics.py      # 运动学 FK/IK 一致性（6 用例，仅 numpy）
 python3 tests/test_feetech_bus.py     # Feetech 协议层（14 用例：控制表/符号编码/零点语义/
                                       # 官方参数对齐/EEPROM 偏移累加/G3 限幅，PC 与板端均可跑）
+python3 tests/test_episode_quality.py # M1 采集质量层（9 用例：帧率/丢帧/追踪/时长门控+统计）
 python3 runtime/shared_frame.py       # 共享内存帧缓冲自检
 ```
+
+## 8. M1 演示数据采集
+
+### 8.1 数据规范
+
+```
+data/raw/<task>/episode_0001.json     单条 episode（与 lerobot-record-lite 同格式：
+                                      {"fps":30,"total_frames":N,"duration_s":T,
+                                       "frames":[{"J1".."J6":deg,"F1".."F6":deg,"t":sec}]}）
+data/raw/<task>/manifest.json         会话清单（逐条质量校验结果 + 元数据 + 汇总统计）
+```
+`J*` = 主臂（指令）角度；`F*` = 从臂实际角度（`--log-follower`/采集工具自动记录，用于追踪误差）。
+数据目录已在 `.gitignore` 排除（`data/raw/`、`episodes/`、`datasets/`、`record_*.json`）。
+
+### 8.2 采集（板端，一次连接多集连采）
+
+```bash
+python3 tools/collect_episodes.py --task pick_place --episodes 50 --episode-time 20 \
+    --leader-calib config/calibration_leader.json \
+    --follower-calib config/calibration.json --max-step 15
+```
+
+每条 episode：摆回起始姿态 → Enter → 跟随录制 episode-time 秒 → 自动质量门控 →
+合格落盘 `episode_XXXX.json` 并刷新 `manifest.json`；不合格提示 `[R] 重录 / [A] 强制保留 / [Q] 退出`。
+`--start-index` 支持断点续采（缺省自动接续已有最大序号 +1）；Ctrl-C 安全退出并打印会话汇总。
+
+质量门控默认阈值（`--min-fps-ratio/--max-drop-ratio/--max-track-err/--min-duration-ratio` 可覆盖）：
+
+| 项 | 默认 | 含义 |
+|---|---|---|
+| 帧率 | ≥ 目标×0.90 | 实测 fps 下限（30fps → 27） |
+| 丢帧 | ≤ 1% | 帧间隔 > 1.5×周期 的占比 |
+| 追踪误差 | ≤ 5.0° | 体关节(J1-J5)逐关节平均 \|从臂实际−指令\|（夹爪单独报告，不参与门控） |
+| 时长 | ≥ 请求×0.95 | 实测时长下限 |
+
+### 8.3 统计与体检（任一端）
+
+```bash
+python3 tools/dataset_stats.py data/raw/pick_place --calib config/calibration.json \
+    --json dataset_stats.json --md dataset_report.md
+python3 tools/dataset_stats.py data/raw --all-tasks          # 全部任务
+```
+输出：条数/合格数、总帧数与总时长、帧率 min/mean、逐关节 min/max/幅度/均值/追踪误差、
+**标定行程覆盖率**（数据幅度 ÷ 标定行程，<30% 提示"数据多样性不足"），并列出不合格条目及原因。
+
+### 8.4 训练格式转换（PC 端）
+
+```bash
+# npz（仅 numpy）
+python3 scripts/json_to_lerobot.py --input-dir data/raw/pick_place --format npz \
+    --out episodes/pick_place --summary conversion_summary.json
+# LeRobotDataset（PC 端 lerobot env）
+python3 scripts/json_to_lerobot.py --input-dir data/raw/pick_place --format lerobot \
+    --repo-id local/so101_pick_place --task "拿起方块" \
+    --root ~/datasets/so101_pick_place --summary conversion_summary.json
+```
+`--input-dir` 按 episode 序号排序批量转换（自动跳过 `manifest.json`），`--summary` 输出逐文件
+成败/帧数汇总。数据流：板端采集 → rsync → PC 转换 → M2 训练。
+
+### 8.5 数据流与验收
+
+| 阶段 | 命令 | 产物 |
+|---|---|---|
+| 采集 | `tools/collect_episodes.py` | `data/raw/<task>/episode_*.json` + `manifest.json` |
+| 体检 | `tools/dataset_stats.py` | `dataset_stats.json` / `dataset_report.md` |
+| 转换 | `scripts/json_to_lerobot.py --input-dir` | `episodes/*.npz` 或 LeRobotDataset |
+| 训练 | M2（`policy/`） | 检查点 + 评测 |

@@ -67,3 +67,15 @@ venv/
 *.log
 test_output.txt
 test_result.txt
+
+# M1 采集数据与转换产物（演示数据不入库；code 入库存代码与工具）
+data/raw/
+data/interim/
+episodes/
+datasets/
+record_*.json
+manifest.json
+conversion_summary.json
+dataset_stats.json
+dataset_report.md
+
