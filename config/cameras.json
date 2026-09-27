@@ -1,14 +1,26 @@
 {
   "jpeg_quality": 90,
-  "warmup_seconds": 3.0,
   "cameras": [
     {
       "name": "front",
       "type": "realsense",
       "width": 640,
       "height": 480,
-      "fps": 30
+      "fps": 30,
+      "warmup_seconds": 3.0
+    },
+    {
+      "name": "wrist",
+      "type": "usb",
+      "device": "/dev/v4l/by-id/usb-icSpring_icspring_camera_20240307110322-video-index0",
+      "width": 640,
+      "height": 480,
+      "fps": 30,
+      "fourcc": "MJPG",
+      "buffersize": 4,
+      "warmup_s": 1.0,
+      "rotation": 0
     }
   ],
-  "_comment": "M1 采集相机配置。front = D435i 固定第三人称视角（与 config/settings.py CAMERA_POSITION 手眼标定一致，建议固定安装、视野覆盖整个工作区）。若要加腕部相机，追加一项 {\"name\":\"wrist\",\"type\":\"usb\",\"device\":0,\"width\":640,\"height\":480} 即可（支持多相机，图像按 <episode>_images/<name>/ 分目录、序号与关节帧一一对应）。"
+  "_comment": "M1 采集相机配置。front=D435i 固定第三人称（与 config/settings.py CAMERA_POSITION 手眼标定一致，必须固定安装并覆盖整个工作区）；wrist=icSpring USB 相机（follower 末端）。device 用 /dev/v4l/by-id/ 稳定路径而不是索引（节点号会随重插变化，按索引还会被 cv2 深度相机探测干扰）。USB 相机 fourcc=MJPG 是 640x480@30fps 的前提；buffersize=4 实测必要（=1 时驱动丢帧只剩 15fps）；若图像上下颠倒/横竖不对，把 rotation 设成 90/180/270。"
 }

@@ -1,5 +1,37 @@
 # 开发日志 (CHANGELOG)
 
+## 双臂相机接入 + 采集侧性能修正（2026-09-27）
+
+M1 相机确定：**双视角** —— `front`=D435i 第三人称固定（与既有手眼标定一致）+
+`wrist`=icSpring USB 相机（末端）。对照 lerobot 官方相机实现（`cameras/opencv`、
+`cameras/realsense`，Apache-2.0）逐项对齐。
+
+### 新增
+- `tools/cam_preview.py`：取景检查工具（逐相机存图 + 实测帧率 + 视野/朝向核对）
+- `config/cameras.json`：双相机配置（wrist 用 `/dev/v4l/by-id/` 稳定路径而非索引）
+- `tools/cam_sink.py` 对齐 lerobot：USB 相机支持**设备路径**、`fourcc`（默认 MJPG）、
+  `buffersize`、`warmup_s`、`rotation`（0/90/180/270）、流程起始 `cv2.setNumThreads(1)`；
+  FOURCC 与实际分辨率/帧率**回读校验并告警**
+
+### 修复（板端实测暴露，均会影响 M1 数据质量）
+- **USB 相机只有 15fps**: 两个原因叠加——(a) `CAP_PROP_BUFFERSIZE=1` 时该 UVC 驱动丢帧，
+  改 4 后 29.8fps；(b) FOURCC 设置顺序错误（先 FOURCC 后分辨率会被驱动重置回 YUYV），
+  改为先分辨率/帧率、后 FOURCC（并回读校验）
+- **主环被相机拖慢**: 每帧 4~6 次整帧 memcpy（0.9MB/次）使 30Hz 采集环单次迭代达 ~45ms、
+  USB 相机唯一帧率掉到 14.4fps。改为 `CameraSet.latest()` 零拷贝 + `JpegSink` 零拷贝入队、
+  编码在有界队列写线程内完成 + 写线程绑 A55 小核 → **主环 0.55ms（p95 0.76ms）**，
+  两相机均 **29.9fps**
+- 修掉按索引探测相机被 cv2 深度相机（obsensor）探测干扰的问题（显式 `CAP_V4L2` + by-id 路径）
+
+### 实测（板端，机械臂不动）
+| 项 | 数值 |
+|---|---|
+| front D435i 640×480 | 29.9 fps，180/180 唯一帧，≈29.7KB/帧 |
+| wrist USB MJPG 640×480 | 29.9 fps，180/180 唯一帧，≈10.8KB/帧 |
+| 采集主环单次迭代 | 中位 0.55ms / p95 0.76ms |
+| 双相机落盘 | 6 秒 360 帧全部写盘，零丢弃/零失败 |
+| 体积预估 | 50 条 × 20s × 30fps ≈ 1.2GB（双相机，q90） |
+
 ## M1 加入 RGB 视觉观测（2026-09-27）
 
 M1 数据格式决策：**关节 + RGB**（视觉策略 ACT/DP/VLA 的必要观测；纯关节数据无法训练视觉策略，

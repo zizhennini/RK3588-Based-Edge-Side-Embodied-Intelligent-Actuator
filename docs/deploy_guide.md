@@ -278,17 +278,30 @@ data/raw/<task>/manifest.json               会话清单（逐条质量校验 + 
 
 ```json
 {"jpeg_quality": 90, "cameras": [
-  {"name": "front", "type": "realsense", "width": 640, "height": 480, "fps": 30}
+  {"name": "front", "type": "realsense", "width": 640, "height": 480, "fps": 30},
+  {"name": "wrist", "type": "usb", "device": "/dev/v4l/by-id/usb-icSpring_...-video-index0",
+   "width": 640, "height": 480, "fps": 30, "fourcc": "MJPG", "buffersize": 4}
 ]}
 ```
 - `front` = D435i 固定第三人称视角。**必须固定安装**并覆盖整个工作区（与
-  `config/settings.py` 的 `CAMERA_POSITION` 手眼标定一致）；取景检查用
-  `python3 scripts/d435i_viewer.py`。
-- 需要腕部视角时追加一项 `{"name":"wrist","type":"usb","device":0,...}` 即可（支持多相机；
-  **同一批数据必须用同一套相机与安装位置**，否则训练的视觉观测分布不一致）。
-- 板端实测：D435i 640×480 RGB **29.8 fps**，与 30Hz 关节环一一对应；单帧 JPEG ≈30KB
-  （50 条 × 20s ≈ 30MB/相机）。
-- 相机有约 3 秒预热期，采集工具会先 `wait_ready()` 等首帧再开始，预热未就绪会告警并跳过该相机。
+  `config/settings.py` 的 `CAMERA_POSITION` 手眼标定一致）。
+- `wrist` = 末端 USB 相机（icSpring）。`device` 用 **`/dev/v4l/by-id/` 稳定路径**，
+  不要用索引：节点号随重插变化，且按索引会触发 cv2 的深度相机（obsensor）探测干扰。
+- 取景检查：`python3 tools/cam_preview.py --out cam_preview`（逐相机存图 + 实测帧率）；
+  确认视野/朝向后再固定，必要时用 `rotation`（90/180/270）纠正横竖。
+- **同一批数据必须用同一套相机与安装位置**，否则训练的视觉观测分布不一致。
+
+板端实测与踩坑记录（对照 lerobot 官方相机实现 `cameras/opencv`、`cameras/realsense`）：
+
+| 项 | 结论 |
+|---|---|
+| D435i 640×480 RGB | 29.8 fps（与 30Hz 关节环一一对应）；`warmup_seconds=3` 预热期无帧，工具会 `wait_ready()` 等首帧 |
+| USB 相机 MJPG 640×480 | **29.8 fps**；`v4l2-ctl --list-formats-ext` 确认支持 MJPG 到 1920×1080@30 |
+| `buffersize` | **必须 ≥4**：=1 时该 UVC 驱动在任何读取抖动下丢帧，实测掉到 **15 fps**（lerobot 不设该项，用驱动默认） |
+| `fourcc` | 必须显式设 MJPG，且**先设分辨率/帧率、后设 FOURCC**（反序会被驱动重置回 YUYV，USB2 上只能 ~15fps）；工具会回读校验并告警 |
+| `cv2.setNumThreads(1)` | lerobot 同款：避免 cv2 内部线程池与采集/写盘线程争抢（小核上争抢直接掉帧） |
+| 拷贝开销 | 一帧 640×480×3 ≈ 0.9MB。曾因每帧 4~6 次 memcpy 把主环拖到 45ms/次、USB 相机掉到 15fps；改为**零拷贝入队 + 写线程编码**后主环 **0.55ms/次（p95 0.76ms）** |
+| 体积 | front ≈29.7KB/帧、wrist ≈10.8KB/帧（q90）→ 50 条 × 20s ≈ **1.2GB**（双相机） |
 
 ### 8.3 采集（板端，一次连接多集连采）
 
