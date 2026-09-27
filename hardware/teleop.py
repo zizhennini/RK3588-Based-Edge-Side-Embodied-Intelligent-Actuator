@@ -18,7 +18,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from hardware.feetech_bus import (FeetechBus, GRIPPER_MOTOR_ID, angle_zero,
-                                  raw_to_rad)
+                                  raw_to_rad, resolve_port)
 from hardware.arm import SO101Arm, DEFAULT_CALIBRATION, JOINT_NAMES
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,8 @@ class LeaderArm:
 
     def __init__(self, port: str = "/dev/ttyACM1", baud: int = 1_000_000,
                  calibration: Optional[dict] = None):
-        self.bus = FeetechBus(port, baud=baud, name="leader")
+        self.port = resolve_port("leader", port)
+        self.bus = FeetechBus(self.port, baud=baud, name="leader")
         self.calibration = calibration or dict(DEFAULT_CALIBRATION)
         self._connected = False
 
@@ -92,7 +93,7 @@ class TeleopPair:
         self.handshake = handshake
         self.leader = LeaderArm(leader_port, calibration=leader_calibration)
         self.follower = SO101Arm(
-            port=follower_port,
+            port=resolve_port("follower", follower_port),
             calibration_path=follower_calibration_path,
             max_relative_step_deg=max_relative_step_deg,
         )
@@ -149,13 +150,15 @@ class TeleopPair:
         return joints
 
     def run(self, duration_s: float = 0, out_path: Optional[str] = None,
-            follow: bool = True) -> List[dict]:
+            follow: bool = True, log_follower: bool = False) -> List[dict]:
         """运行遥操作环并录制
 
         Args:
             duration_s: 录制时长（秒）；<=0 或 None = **无限时**，Ctrl-C 结束并保存
             out_path: JSON 输出路径（None 不保存）
             follow: False 时只录不跟随（从臂不动）
+            log_follower: True 时每帧读回从臂实际角度（字段 F1..F6），
+                结束时打印逐关节追踪误差——把"感觉对不上"变成可测量数字
         Returns:
             frames 列表
         """
@@ -185,6 +188,15 @@ class TeleopPair:
                     leader_fail_frames = 0
                     frame = {f"J{i + 1}": round(float(np.rad2deg(joints[i])), 1)
                              for i in range(6)}
+                    if log_follower and follow:
+                        # 读回从臂实际角度，量化追踪误差（追踪滞后/反向会立刻暴露）
+                        try:
+                            actual = self.follower.read_positions()
+                            for i in range(6):
+                                frame[f"F{i + 1}"] = round(
+                                    float(np.rad2deg(actual[i])), 1)
+                        except Exception as e:
+                            logger.debug("从臂读回失败（跳过该帧误差记录）: %s", e)
                     frame["t"] = round(elapsed, 3)
                     frames.append(frame)
                 else:
@@ -211,9 +223,36 @@ class TeleopPair:
         print(f"录制结束: {len(frames)} 帧, {elapsed_total:.1f}s, "
               f"实测 {measured_fps:.1f} fps（目标 {self.fps}）"
               + (f", 串口自恢复 {recovered} 次" if recovered else ""))
+        if log_follower:
+            self._report_tracking(frames)
         if out_path:
             self.save(frames, out_path, duration_s=elapsed_total)
         return frames
+
+    @staticmethod
+    def _report_tracking(frames: List[dict]) -> None:
+        """打印逐关节追踪误差（|从臂实际 − 主臂指令|，度）"""
+        errs = {i: [] for i in range(1, 7)}
+        for f in frames:
+            for i in range(1, 7):
+                if f"F{i}" in f:
+                    errs[i].append(abs(f[f"F{i}"] - f[f"J{i}"]))
+        if not any(errs[i] for i in errs):
+            print("追踪误差: 无数据（从臂读回全部失败）")
+            return
+        print("追踪误差 |从臂实际 − 主臂指令|（度）:  平均 / 最大")
+        worst = (0, 0.0)
+        for i in range(1, 7):
+            if not errs[i]:
+                continue
+            avg = sum(errs[i]) / len(errs[i])
+            mx = max(errs[i])
+            print(f"  J{i}: {avg:6.2f} / {mx:6.2f}")
+            if avg > worst[1]:
+                worst = (i, avg)
+        print(f"  → 最大平均误差 J{worst[0]} = {worst[1]:.2f}°"
+              + ("（正常，<5° 说明跟随贴合）" if worst[1] < 5.0
+                 else "（偏大：检查该关节机械阻力/供电/限幅）"))
 
     def save(self, frames: List[dict], out_path: str,
              duration_s: Optional[float] = None) -> None:

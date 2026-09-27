@@ -15,6 +15,7 @@
 依赖: feetech-servo-sdk（提供 scservo_sdk）+ pyserial —— 两端均已部署实测。
 """
 import logging
+import os
 import time
 from contextlib import contextmanager
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -22,6 +23,23 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+#: udev 稳定软链（由 config/99-so101.rules 生成）——断电/重插后 ttyACM 编号会互换
+#: （枚举顺序不定），按 USB 序列号绑定的软链不会
+STABLE_PORT = {"leader": "/dev/so101_leader", "follower": "/dev/so101_follower"}
+
+
+def resolve_port(role: str, fallback: str) -> str:
+    """解析串口路径: 优先 udev 稳定软链，缺失则回退 ttyACM 编号
+
+    Args:
+        role: "leader" / "follower"
+        fallback: 软链不存在时的回退路径（如 /dev/ttyACM1）
+    """
+    p = STABLE_PORT.get(role)
+    if p and os.path.exists(p):
+        return p
+    return fallback
 
 # ---------------------------------------------------------------------------
 # STS3215 控制表（Feetech STS/SMS 系列，Protocol 0）

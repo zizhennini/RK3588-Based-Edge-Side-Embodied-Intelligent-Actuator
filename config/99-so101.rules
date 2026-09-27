@@ -1,0 +1,19 @@
+# config/99-so101.rules — SO-ARM101 主从臂串口稳定命名（udev）
+#
+# 问题: 两条 USB 串口适配器（QinHeng 1a86:55d3）在断电重启/重新插拔后会按枚举顺序
+#       重新分配 ttyACM0/ttyACM1，导致 leader/follower 端口互换（标定与跟随都会串臂）。
+# 方案: 按 USB 序列号绑定固定软链 /dev/so101_leader、/dev/so101_follower，
+#       代码侧（feetech_bus.resolve_port）优先使用这两个软链。
+#
+# 安装（板端 root）:
+#   sudo cp config/99-so101.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#   ls -l /dev/so101_*        # 应看到两条软链
+#
+# 序列号查看:
+#   ls -l /dev/serial/by-id/  # usb-1a86_USB_Single_Serial_<SERIAL>-if00
+# 若换了适配器/机械臂，把下面的 serial 换成实际的（其余字段不用改）。
+# 也可用 ENV{ID_SERIAL_SHORT} 代替 ATTRS{serial}（等价）。
+
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d3", ATTRS{serial}=="5AAF262805", SYMLINK+="so101_leader", MODE="0666", GROUP="dialout"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d3", ATTRS{serial}=="5B41532950", SYMLINK+="so101_follower", MODE="0666", GROUP="dialout"

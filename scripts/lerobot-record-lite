@@ -52,7 +52,8 @@ def run_follow(args, out_path):
             input("按 Enter 开始无限时跟随+录制（Ctrl-C 结束并保存）...")
         else:
             input("按 Enter 开始跟随+录制 {} 秒...".format(args.episode_time_s))
-        pair.run(args.episode_time_s, out_path=out_path, follow=True)
+        pair.run(args.episode_time_s, out_path=out_path, follow=True,
+                 log_follower=args.log_follower)
 
 
 def main():
@@ -71,6 +72,8 @@ def main():
                         help="从臂标定 JSON（follow 模式）")
     parser.add_argument("--max-step", type=float, default=15.0,
                         help="G3 帧间限幅（度/帧，0=关闭）")
+    parser.add_argument("--log-follower", action="store_true",
+                        help="每帧读回从臂实际角度并打印逐关节追踪误差（跟随质量量化）")
     args = parser.parse_args()
 
     out_path = args.out or "record_{}.json".format(datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
@@ -79,7 +82,10 @@ def main():
         run_follow(args, out_path)
         return
 
-    ser = serial.Serial(args.teleop_port, SERIAL_BAUD, timeout=0.05)
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    from hardware.feetech_bus import resolve_port
+    ser = serial.Serial(resolve_port("leader", args.teleop_port), SERIAL_BAUD,
+                        timeout=0.05)
     print("按 Enter 开始录制 {} 秒（请先启动遥操作）...".format(args.episode_time_s))
     input()
 

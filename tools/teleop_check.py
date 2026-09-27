@@ -28,7 +28,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import numpy as np  # noqa: E402
-from hardware.feetech_bus import FeetechBus, GRIPPER_MOTOR_ID, raw_to_rad  # noqa: E402
+from hardware.feetech_bus import (FeetechBus, GRIPPER_MOTOR_ID, raw_to_rad,  # noqa: E402
+                                  resolve_port)
 
 JOINT_LABELS = {1: "shoulder_pan", 2: "shoulder_lift", 3: "elbow_flex",
                 4: "wrist_flex", 5: "wrist_roll", 6: "gripper"}
@@ -57,8 +58,11 @@ def main() -> int:
     ap.add_argument("--follower-calib", default="config/calibration.json")
     args = ap.parse_args()
 
-    lead = read_deg(args.leader, args.leader_calib, "leader")
-    foll = read_deg(args.follower, args.follower_calib, "follower")
+    l_port = resolve_port("leader", args.leader)
+    f_port = resolve_port("follower", args.follower)
+    print(f"端口: leader={l_port}  follower={f_port}")
+    lead = read_deg(l_port, args.leader_calib, "leader")
+    foll = read_deg(f_port, args.follower_calib, "follower")
     if len(lead) < 6 or len(foll) < 6:
         print(f"读取不全: leader {sorted(lead)} / follower {sorted(foll)}")
         return 1

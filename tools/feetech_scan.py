@@ -128,6 +128,12 @@ def do_identify(ports: list, baud: int) -> int:
             print("  Phase: " + " ".join(f"id{k}=0x{v:02X}"
                                        for k, v in sorted(phases.items())))
             print(f"  Present_Position: {dict(sorted(pos.items()))}")
+            # 打印按序列号绑定的稳定路径（防断电重启后 ttyACM 编号互换）
+            import glob as _glob
+            import os as _os
+            for link in sorted(_glob.glob("/dev/serial/by-id/*")):
+                if _os.path.realpath(link) == _os.path.realpath(port):
+                    print(f"  稳定路径: {link}")
             high = [k for k, v in phases.items() if v & 0x40]
             if high:
                 print(f"  ⚠ Phase bit6 置位（计数方向可能反向）: {high} —— 建议重跑 configure")
