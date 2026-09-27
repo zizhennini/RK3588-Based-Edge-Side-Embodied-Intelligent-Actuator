@@ -1,5 +1,34 @@
 # 开发日志 (CHANGELOG)
 
+## M1 加入 RGB 视觉观测（2026-09-27）
+
+M1 数据格式决策：**关节 + RGB**（视觉策略 ACT/DP/VLA 的必要观测；纯关节数据无法训练视觉策略，
+事后重采成本高）。相机位置可固定，预留多相机（腕部 USB）扩展。
+
+### 新增
+- **`tools/cam_sink.py`**：采集侧相机层。复用 `hardware/camera_d435i.CameraManager`
+  （D435i RGB+Depth，非阻塞 `get_frame`）与 USB 相机（cv2 + 抓帧线程），统一暴露
+  `CameraSet.latest(name)`（统一 BGR）；**`wait_ready()`** 等待预热首帧（D435i 有 3s 预热，
+  不等会导致整场空录图像）。`JpegSink` 异步 JPEG 写盘（有界队列 + 写线程），保证 30Hz
+  遥操作环不被磁盘 IO 阻塞，队列溢出/写失败计数上报
+- **`config/cameras.json`**：相机配置（默认 `front`=D435i 640×480@30；追加
+  `{"name":"wrist","type":"usb","device":0}` 即多相机）
+- **`hardware/teleop.py`**：`run(..., frame_cb=)` 每帧回调（采集侧抓相机帧；teleop 本身
+  不依赖相机，保持硬件无关）
+- **`tools/collect_episodes.py`**：接入相机——`<episode>_images/<cam>/000000.jpg`（序号与关节帧
+  一一对应）、帧内记录 `ct_<cam>`（相机帧时间戳，同值=重复帧，便于事后检测滞后）、
+  manifest 记录各相机帧数；新增**图像完整性门控**（缺帧 >0.5% 判不合格）
+- **`scripts/json_to_lerobot.py`**：`--format lerobot` 自动带 `observation.images.<cam>`
+  （dtype=video），图像缺失帧用上一帧填充并统计打印；`--summary` 增加各相机帧数；
+  `--no-images` 可关
+- **`tools/dataset_stats.py`**：逐条识别图像目录并纳入质量判定，报告打印各相机总帧数
+- 单测 9 → 10（`image completeness check`）
+
+### 实测（板端真机）
+- D435i 640×480 RGB 实测 **29.8 fps**（与 30Hz 关节环一一对应）
+- 采集落盘路径验证：3 秒 68 帧全部写盘成功（JPEG 平均 29.5KB，图像内容正常）
+- 50 条 × 20s 预估体积 ≈30MB/相机（JPEG q90）
+
 ## M1 数据采集流程落地（2026-09-27）
 
 ### 新增

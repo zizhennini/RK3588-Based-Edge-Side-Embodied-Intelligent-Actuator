@@ -1,0 +1,14 @@
+{
+  "jpeg_quality": 90,
+  "warmup_seconds": 3.0,
+  "cameras": [
+    {
+      "name": "front",
+      "type": "realsense",
+      "width": 640,
+      "height": 480,
+      "fps": 30
+    }
+  ],
+  "_comment": "M1 采集相机配置。front = D435i 固定第三人称视角（与 config/settings.py CAMERA_POSITION 手眼标定一致，建议固定安装、视野覆盖整个工作区）。若要加腕部相机，追加一项 {\"name\":\"wrist\",\"type\":\"usb\",\"device\":0,\"width\":640,\"height\":480} 即可（支持多相机，图像按 <episode>_images/<name>/ 分目录、序号与关节帧一一对应）。"
+}

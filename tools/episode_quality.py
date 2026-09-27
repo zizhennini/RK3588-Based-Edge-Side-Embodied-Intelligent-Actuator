@@ -135,6 +135,27 @@ def check_episode(frames: Sequence[dict], target_fps: float = 30.0,
     return {"ok": not reasons, "reasons": reasons, "metrics": metrics}
 
 
+def check_images(image_counts: Dict[str, int], frames: int,
+                 max_missing_ratio: float = 0.005) -> Dict[str, object]:
+    """相机帧完整性检查: 各相机已写盘帧数 vs 关节帧数
+
+    Args:
+        image_counts: {cam_name: written_jpeg_count}
+        frames: 关节帧数
+    """
+    reasons = []
+    detail = {}
+    for cam, n in (image_counts or {}).items():
+        missing = max(0, frames - int(n))
+        ratio = missing / frames if frames else 0.0
+        detail[cam] = {"written": int(n), "missing": missing,
+                       "missing_ratio": round(ratio, 4)}
+        if ratio > max_missing_ratio:
+            reasons.append(f"相机 {cam} 缺帧 {missing}/{frames}（{ratio:.1%} > "
+                           f"{max_missing_ratio:.1%}）")
+    return {"ok": not reasons, "reasons": reasons, "detail": detail}
+
+
 def dataset_stats(episodes: Sequence[dict]) -> Dict[str, object]:
     """数据集汇总统计
 

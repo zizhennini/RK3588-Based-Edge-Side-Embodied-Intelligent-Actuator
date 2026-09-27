@@ -24,9 +24,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tools.episode_quality import (JOINT_NAMES, check_episode, dataset_stats,  # noqa: E402
-                                   format_report)
-from scripts.json_to_lerobot import episode_sort_key  # noqa: E402
+from tools.episode_quality import (JOINT_NAMES, check_episode, check_images,  # noqa: E402
+                                   dataset_stats, format_report)
+from scripts.json_to_lerobot import episode_sort_key, find_images  # noqa: E402
 
 
 def load_frames(path: Path):
@@ -46,7 +46,16 @@ def scan_task(task_dir: Path, fps: int, requested_s=None, thresholds=None) -> di
             frames, file_fps, _ = load_frames(p)
             q = check_episode(frames, target_fps=file_fps or fps,
                               requested_s=requested_s, thresholds=thresholds)
-            episodes.append({"file": p.name, "frames": frames, "quality": q})
+            imgs = find_images(p)
+            img_counts = {c: len(v) for c, v in imgs.items()}
+            if img_counts:
+                iq = check_images(img_counts, q["metrics"]["frames"])
+                q["images"] = iq
+                if not iq["ok"]:
+                    q["ok"] = False
+                    q["reasons"] += iq["reasons"]
+            episodes.append({"file": p.name, "frames": frames, "quality": q,
+                             "images": img_counts})
         except Exception as e:
             print(f"✗ 跳过 {p.name}: {e}", file=sys.stderr)
     return {"task": task_dir.name, "episodes": episodes,
@@ -102,9 +111,18 @@ def main() -> int:
         res = scan_task(td, args.fps, args.requested_s)
         results.append(res)
         st = res["stats"]
-        report += [f"## 任务: {res['task']}", "", "```", format_report(st), "```", ""]
+        cams = sorted({c for e in res["episodes"] for c in (e.get("images") or {})})
+        cam_line = ""
+        if cams:
+            cam_line = "图像: " + ", ".join(
+                f"{c}={sum((e.get('images') or {}).get(c, 0) for e in res['episodes'])} 帧"
+                for c in cams) + f"（{len(res['episodes'])} 条 episode）"
+        report += [f"## 任务: {res['task']}", "", "```", format_report(st),
+                   cam_line, "```", ""]
         print(f"\n=== 任务 {res['task']} ===")
         print(format_report(st))
+        if cam_line:
+            print(cam_line)
         if args.calib:
             cov = calib_coverage(st, args.calib)
             print("\n".join(cov))

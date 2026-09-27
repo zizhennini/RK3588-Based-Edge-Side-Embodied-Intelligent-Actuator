@@ -32,7 +32,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.episode_quality import (DEFAULT_THRESHOLDS, check_episode,  # noqa: E402
-                                   format_report, dataset_stats)
+                                   check_images, dataset_stats, format_report)
+from tools.cam_sink import CameraSet, JpegSink  # noqa: E402
 
 
 def load_calib(path: str):
@@ -107,6 +108,11 @@ def main() -> int:
                     default=DEFAULT_THRESHOLDS["min_duration_ratio"])
     ap.add_argument("--no-track-check", action="store_true",
                     help="关闭追踪误差门控（不读回从臂时使用）")
+    # 相机（默认读 config/cameras.json，存在即启用；--no-camera 强制关闭）
+    ap.add_argument("--cameras", default="./config/cameras.json",
+                    help="相机配置 JSON（含 cameras 列表: realsense/usb）")
+    ap.add_argument("--no-camera", action="store_true", help="本次不录图像（仅关节）")
+    ap.add_argument("--jpeg-quality", type=int, default=90)
     args = ap.parse_args()
 
     thresholds = {
@@ -152,6 +158,25 @@ def main() -> int:
         max_relative_step_deg=args.max_step,
     )
 
+    cam_set = None
+    cam_names = []
+    cam_cfg_path = None if args.no_camera else args.cameras
+    if cam_cfg_path and Path(cam_cfg_path).exists():
+        try:
+            cam_set = CameraSet.from_config(cam_cfg_path)
+            cam_set.start()
+            ready = cam_set.wait_ready(timeout_s=20.0)
+            cam_names = [c for c, ok in ready.items() if ok]
+            print(f"相机: {cam_names}（配置 {cam_cfg_path}）"
+                  + ("" if len(cam_names) == len(ready) else
+                     f"  ⚠ 未就绪: {[c for c, ok in ready.items() if not ok]}"))
+        except Exception as e:
+            print(f"⚠ 相机启动失败，本次仅录关节: {e}")
+            cam_set = None
+            cam_names = []
+    else:
+        print("相机: 未启用（无配置或无 --no-camera 之外的配置）")
+
     done = fails = 0
     try:
         with pair:
@@ -165,16 +190,46 @@ def main() -> int:
                     print("\n会话结束（未开始本条）")
                     break
 
+                img_dir = task_dir / f"episode_{idx:04d}_images"
+                sink = None
+                frame_cb = None
+                if cam_set and cam_names:
+                    sink = JpegSink(img_dir, cam_names, quality=args.jpeg_quality)
+                    sink.start()
+
+                    def frame_cb(i, elapsed, frame, _sink=sink,
+                                 _cams=list(cam_names)):
+                        """每关节帧抓一次各相机最新帧（序号与关节帧一一对应）"""
+                        for c in _cams:
+                            got = cam_set.latest(c)
+                            if got is None:
+                                continue
+                            bgr, ts = got
+                            _sink.push(c, bgr)
+                            frame[f"ct_{c}"] = round(ts, 4)
+
                 frames = pair.run(args.episode_time, out_path=None, follow=True,
-                                  log_follower=not args.no_track_check)
+                                  log_follower=not args.no_track_check,
+                                  frame_cb=frame_cb)
+                img_counts = sink.finish() if sink else {}
                 quality = check_episode(frames, target_fps=args.fps,
                                         requested_s=args.episode_time,
                                         thresholds=thresholds)
+                if img_counts:
+                    img_q = check_images({c: v["written"] for c, v in img_counts.items()},
+                                         quality["metrics"]["frames"])
+                    quality["images"] = img_q
+                    if not img_q["ok"]:
+                        quality["ok"] = False
+                        quality["reasons"] += img_q["reasons"]
                 m = quality["metrics"]
                 print(f"  帧数 {m['frames']}  时长 {m['duration_s']}s  "
                       f"fps {m['fps']}  丢帧 {m['dropped']}  "
                       + (f"追踪最差 J{m['track_worst_joint']} "
-                         f"{m['track_worst_mean']}°" if m["track_has_data"] else "追踪未测"))
+                         f"{m['track_worst_mean']}°" if m["track_has_data"] else "追踪未测")
+                      + ("  图像 " + ", ".join(f"{c}:{v['written']}"
+                                               for c, v in img_counts.items())
+                         if img_counts else ""))
 
                 accepted_by_user = False
                 if quality["ok"]:
@@ -197,6 +252,8 @@ def main() -> int:
                     "frames": m["frames"],
                     "duration_s": m["duration_s"],
                     "fps": m["fps"],
+                    "image_dir": img_dir.name if img_counts else None,
+                    "images": img_counts or None,
                     "quality": quality,
                     "accepted_by_user": accepted_by_user,
                     "recorded_at": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -210,6 +267,11 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\n会话中断")
     finally:
+        if cam_set is not None:
+            try:
+                cam_set.stop()
+            except Exception as e:
+                print(f"⚠ 相机关闭异常: {e}")
         if manifest["episodes"]:
             write_manifest(task_dir, manifest)
             s = manifest["summary"]

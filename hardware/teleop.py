@@ -150,7 +150,8 @@ class TeleopPair:
         return joints
 
     def run(self, duration_s: float = 0, out_path: Optional[str] = None,
-            follow: bool = True, log_follower: bool = False) -> List[dict]:
+            follow: bool = True, log_follower: bool = False,
+            frame_cb=None) -> List[dict]:
         """运行遥操作环并录制
 
         Args:
@@ -159,6 +160,8 @@ class TeleopPair:
             follow: False 时只录不跟随（从臂不动）
             log_follower: True 时每帧读回从臂实际角度（字段 F1..F6），
                 结束时打印逐关节追踪误差——把"感觉对不上"变成可测量数字
+            frame_cb: 可选回调 ``cb(frame_index, elapsed_s, frame_dict)``，
+                每记录一帧调用一次（采集侧用它抓相机帧落盘；本模块不依赖相机）
         Returns:
             frames 列表
         """
@@ -199,6 +202,11 @@ class TeleopPair:
                             logger.debug("从臂读回失败（跳过该帧误差记录）: %s", e)
                     frame["t"] = round(elapsed, 3)
                     frames.append(frame)
+                    if frame_cb is not None:
+                        try:
+                            frame_cb(len(frames) - 1, elapsed, frame)
+                        except Exception as e:
+                            logger.debug("frame_cb 异常（忽略，不影响录制）: %s", e)
                 else:
                     # 无限时场景自恢复: leader 连续丢帧 1 秒 → 尝试串口重置
                     leader_fail_frames += 1

@@ -263,15 +263,34 @@ python3 runtime/shared_frame.py       # 共享内存帧缓冲自检
 ### 8.1 数据规范
 
 ```
-data/raw/<task>/episode_0001.json     单条 episode（与 lerobot-record-lite 同格式：
-                                      {"fps":30,"total_frames":N,"duration_s":T,
-                                       "frames":[{"J1".."J6":deg,"F1".."F6":deg,"t":sec}]}）
-data/raw/<task>/manifest.json         会话清单（逐条质量校验结果 + 元数据 + 汇总统计）
+data/raw/<task>/episode_0001.json           单条 episode（{"fps":30,"total_frames":N,
+                                            "duration_s":T,"frames":[{"J1".."J6":deg,
+                                            "F1".."F6":deg,"t":sec,"ct_<cam>":ts}]}）
+data/raw/<task>/episode_0001_images/        该条图像（每相机一目录，序号=关节帧序号）
+                └── front/000000.jpg
+data/raw/<task>/manifest.json               会话清单（逐条质量校验 + 元数据 + 汇总统计）
 ```
-`J*` = 主臂（指令）角度；`F*` = 从臂实际角度（`--log-follower`/采集工具自动记录，用于追踪误差）。
+`J*` = 主臂（指令）角度；`F*` = 从臂实际角度（追踪误差用）；`ct_<cam>` = 该帧所用相机帧的时间戳
+（同值=重复帧，可用于事后检测相机滞后）。**图像序号与关节帧一一对应**（同一 index 即同一帧）。
 数据目录已在 `.gitignore` 排除（`data/raw/`、`episodes/`、`datasets/`、`record_*.json`）。
 
-### 8.2 采集（板端，一次连接多集连采）
+### 8.2 相机配置（config/cameras.json）
+
+```json
+{"jpeg_quality": 90, "cameras": [
+  {"name": "front", "type": "realsense", "width": 640, "height": 480, "fps": 30}
+]}
+```
+- `front` = D435i 固定第三人称视角。**必须固定安装**并覆盖整个工作区（与
+  `config/settings.py` 的 `CAMERA_POSITION` 手眼标定一致）；取景检查用
+  `python3 scripts/d435i_viewer.py`。
+- 需要腕部视角时追加一项 `{"name":"wrist","type":"usb","device":0,...}` 即可（支持多相机；
+  **同一批数据必须用同一套相机与安装位置**，否则训练的视觉观测分布不一致）。
+- 板端实测：D435i 640×480 RGB **29.8 fps**，与 30Hz 关节环一一对应；单帧 JPEG ≈30KB
+  （50 条 × 20s ≈ 30MB/相机）。
+- 相机有约 3 秒预热期，采集工具会先 `wait_ready()` 等首帧再开始，预热未就绪会告警并跳过该相机。
+
+### 8.3 采集（板端，一次连接多集连采）
 
 ```bash
 python3 tools/collect_episodes.py --task pick_place --episodes 50 --episode-time 20 \
@@ -279,9 +298,9 @@ python3 tools/collect_episodes.py --task pick_place --episodes 50 --episode-time
     --follower-calib config/calibration.json --max-step 15
 ```
 
-每条 episode：摆回起始姿态 → Enter → 跟随录制 episode-time 秒 → 自动质量门控 →
-合格落盘 `episode_XXXX.json` 并刷新 `manifest.json`；不合格提示 `[R] 重录 / [A] 强制保留 / [Q] 退出`。
-`--start-index` 支持断点续采（缺省自动接续已有最大序号 +1）；Ctrl-C 安全退出并打印会话汇总。
+每条 episode：摆回起始姿态 → Enter → 跟随录制 episode-time 秒（关节 + 图像）→ 自动质量门控 →
+合格落盘 `episode_XXXX.json` + `episode_XXXX_images/` 并刷新 `manifest.json`；不合格提示
+`[R] 重录 / [A] 强制保留 / [Q] 退出`。`--start-index` 支持断点续采；`--no-camera` 只录关节。
 
 质量门控默认阈值（`--min-fps-ratio/--max-drop-ratio/--max-track-err/--min-duration-ratio` 可覆盖）：
 
@@ -291,8 +310,9 @@ python3 tools/collect_episodes.py --task pick_place --episodes 50 --episode-time
 | 丢帧 | ≤ 1% | 帧间隔 > 1.5×周期 的占比 |
 | 追踪误差 | ≤ 5.0° | 体关节(J1-J5)逐关节平均 \|从臂实际−指令\|（夹爪单独报告，不参与门控） |
 | 时长 | ≥ 请求×0.95 | 实测时长下限 |
+| 图像完整性 | 缺帧 ≤0.5% | 各相机已写盘 JPEG 数 vs 关节帧数（`--no-camera` 时跳过） |
 
-### 8.3 统计与体检（任一端）
+### 8.4 统计与体检（任一端）
 
 ```bash
 python3 tools/dataset_stats.py data/raw/pick_place --calib config/calibration.json \
@@ -302,25 +322,26 @@ python3 tools/dataset_stats.py data/raw --all-tasks          # 全部任务
 输出：条数/合格数、总帧数与总时长、帧率 min/mean、逐关节 min/max/幅度/均值/追踪误差、
 **标定行程覆盖率**（数据幅度 ÷ 标定行程，<30% 提示"数据多样性不足"），并列出不合格条目及原因。
 
-### 8.4 训练格式转换（PC 端）
+### 8.5 训练格式转换（PC 端）
 
 ```bash
-# npz（仅 numpy）
+# npz（仅 numpy；图像不入 npz，仅元数据记录路径）
 python3 scripts/json_to_lerobot.py --input-dir data/raw/pick_place --format npz \
     --out episodes/pick_place --summary conversion_summary.json
-# LeRobotDataset（PC 端 lerobot env）
+# LeRobotDataset（PC 端 lerobot env；自动带上 observation.images.<cam>，--no-images 可关）
 python3 scripts/json_to_lerobot.py --input-dir data/raw/pick_place --format lerobot \
     --repo-id local/so101_pick_place --task "拿起方块" \
     --root ~/datasets/so101_pick_place --summary conversion_summary.json
 ```
 `--input-dir` 按 episode 序号排序批量转换（自动跳过 `manifest.json`），`--summary` 输出逐文件
-成败/帧数汇总。数据流：板端采集 → rsync → PC 转换 → M2 训练。
+成败/帧数/各相机帧数汇总。lerobot 格式下图像缺失帧自动用上一帧填充并统计打印（不中断转换）。
+数据流：板端采集 → rsync → PC 转换 → M2 训练。
 
-### 8.5 数据流与验收
+### 8.6 数据流与验收
 
 | 阶段 | 命令 | 产物 |
 |---|---|---|
-| 采集 | `tools/collect_episodes.py` | `data/raw/<task>/episode_*.json` + `manifest.json` |
+| 采集 | `tools/collect_episodes.py` | `data/raw/<task>/episode_*.json` + `episode_*_images/` + `manifest.json` |
 | 体检 | `tools/dataset_stats.py` | `dataset_stats.json` / `dataset_report.md` |
-| 转换 | `scripts/json_to_lerobot.py --input-dir` | `episodes/*.npz` 或 LeRobotDataset |
+| 转换 | `scripts/json_to_lerobot.py --input-dir` | `episodes/*.npz` 或 LeRobotDataset（含 `observation.images.*`） |
 | 训练 | M2（`policy/`） | 检查点 + 评测 |

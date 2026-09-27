@@ -59,6 +59,36 @@ def collect_inputs(inputs: list, input_dir: str) -> list:
     return [Path(p) for p in inputs]
 
 
+def find_images(path: Path) -> dict:
+    """查找该 episode 的相机图像目录 → {cam_name: [jpg 路径按序号排序]}
+
+    约定（tools/collect_episodes.py 产物）:
+        <task>/episode_0001.json + <task>/episode_0001_images/<cam>/000000.jpg
+    """
+    img_root = path.parent / f"{path.stem}_images"
+    cams = {}
+    if img_root.is_dir():
+        for d in sorted(img_root.iterdir()):
+            if d.is_dir():
+                files = sorted(d.glob("*.jpg"))
+                if files:
+                    cams[d.name] = files
+    return cams
+
+
+def load_image(path: Path):
+    """读 JPEG → HWC uint8 RGB（cv2 优先，回退 PIL）"""
+    try:
+        import cv2
+        img = cv2.imread(str(path))          # BGR
+        if img is not None:
+            return img[:, :, ::-1].copy()    # → RGB
+    except ImportError:
+        pass
+    from PIL import Image
+    return np.asarray(Image.open(path).convert("RGB"))
+
+
 def load_episode(path: Path) -> dict:
     """读取录制 JSON → {"fps": int, "state": (N,6) 弧度, "timestamps": (N,)}"""
     with open(path, "r", encoding="utf-8") as f:
@@ -103,8 +133,13 @@ def save_npz(episodes: list, out_dir: Path) -> None:
         print(f"✓ {out_dir / (name + '.npz')}  ({len(ep['state'])} 帧)")
 
 
-def save_lerobot(episodes: list, repo_id: str, task: str, root: Path) -> None:
-    """LeRobotDataset API 写入（兼容 0.4.x / 0.6.x import 路径）"""
+def save_lerobot(episodes: list, repo_id: str, task: str, root: Path,
+                 with_images: bool = True) -> None:
+    """LeRobotDataset API 写入（兼容 0.4.x / 0.6.x import 路径）
+
+    with_images=True 时，含图像的 episode 会写入 observation.images.<cam>（dtype=video）。
+    图像缺失/数量不足的帧用上一帧填充（不中断转换），并在结束时打印统计。
+    """
     try:
         from lerobot.datasets.lerobot_dataset import LeRobotDataset  # 0.6.x
     except ImportError:
@@ -118,6 +153,26 @@ def save_lerobot(episodes: list, repo_id: str, task: str, root: Path) -> None:
             "names": JOINT_NAMES,
         },
     }
+    # 图像特征（取第一条带图的 episode 推断相机与分辨率）
+    cam_names, img_shape = [], None
+    for ep in episodes:
+        cams = ep.get("images") or {}
+        if cams:
+            cam_names = list(cams.keys())
+            sample = load_image(cams[cam_names[0]][0])
+            img_shape = sample.shape
+            break
+    if with_images and cam_names and img_shape:
+        for c in cam_names:
+            features[f"observation.images.{c}"] = {
+                "dtype": "video",
+                "shape": img_shape,
+                "names": ["height", "width", "channels"],
+            }
+        print(f"图像特征: {cam_names} {img_shape}")
+    else:
+        print("图像特征: 无（仅关节）")
+
     try:
         ds = LeRobotDataset.create(
             repo_id=repo_id, fps=fps, features=features,
@@ -130,8 +185,19 @@ def save_lerobot(episodes: list, repo_id: str, task: str, root: Path) -> None:
             robot_type="so101", root=str(root),
         )
     for ep in episodes:
+        cams = ep.get("images") or {}
+        last_img = {}
+        n_missing = 0
         for i in range(len(ep["state"])):
             frame = {"observation.state": ep["state"][i]}
+            for c in cam_names:
+                files = cams.get(c) or []
+                if i < len(files):
+                    last_img[c] = load_image(files[i])
+                else:
+                    n_missing += 1
+                if c in last_img:
+                    frame[f"observation.images.{c}"] = last_img[c]
             # 0.4.x/0.6.x add_frame 的 task 传递方式差异 → 双路尝试
             try:
                 ds.add_frame({**frame, "task": task})
@@ -141,7 +207,8 @@ def save_lerobot(episodes: list, repo_id: str, task: str, root: Path) -> None:
             ds.save_episode(task=task)
         except TypeError:
             ds.save_episode()
-        print(f"✓ episode 写入: {ep['source']} ({len(ep['state'])} 帧)")
+        print(f"✓ episode 写入: {ep['source']} ({len(ep['state'])} 帧"
+              + (f", 图像缺帧填充 {n_missing}" if n_missing else "") + ")")
     try:
         ds.consolidate()
     except AttributeError:
@@ -164,6 +231,8 @@ def main() -> int:
     parser.add_argument("--root", default=None, help="lerobot dataset root")
     parser.add_argument("--summary", default=None,
                         help="转换汇总 JSON 输出路径（含逐文件成败/帧数）")
+    parser.add_argument("--no-images", action="store_true",
+                        help="lerobot 格式: 忽略 <episode>_images/ 图像（仅关节）")
     args = parser.parse_args()
 
     if not args.inputs and not args.input_dir:
@@ -182,9 +251,12 @@ def main() -> int:
     for p in files:
         try:
             ep = load_episode(Path(p))
+            imgs = find_images(Path(p))
+            ep["images"] = imgs
             episodes.append(ep)
             records.append({"file": p.name, "status": "ok",
                             "frames": int(len(ep["state"])),
+                            "cameras": {c: len(v) for c, v in imgs.items()},
                             "duration_s": round(float(ep["timestamps"][-1]), 3)
                             if len(ep["timestamps"]) else 0.0})
         except Exception as e:
@@ -202,7 +274,8 @@ def main() -> int:
         save_npz(episodes, Path(args.out))
     else:
         root = Path(args.root or f"./datasets/{args.repo_id.split('/')[-1]}")
-        save_lerobot(episodes, args.repo_id, args.task, root)
+        save_lerobot(episodes, args.repo_id, args.task, root,
+                     with_images=not args.no_images)
 
     if args.summary:
         summary = {

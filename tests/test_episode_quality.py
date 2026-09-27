@@ -148,6 +148,24 @@ def test_threshold_override():
     print("  PASS: 阈值覆盖生效")
 
 
+def test_image_check():
+    """相机帧完整性检查: 少量缺失放行、缺失超阈值拒绝、多相机独立判定"""
+    from tools.episode_quality import check_images
+    ok = check_images({"front": 300}, 300)
+    assert ok["ok"] and ok["detail"]["front"]["missing"] == 0, ok
+    # 1/300 缺失 = 0.33% < 0.5% 放行
+    assert check_images({"front": 299}, 300)["ok"]
+    # 3/300 缺失 = 1% > 0.5% 拒绝
+    bad = check_images({"front": 297}, 300)
+    assert not bad["ok"] and any("缺帧" in r for r in bad["reasons"]), bad
+    # 多相机: 一个合格一个不合格 → 整体不合格
+    mixed = check_images({"front": 300, "wrist": 200}, 300)
+    assert not mixed["ok"] and mixed["detail"]["front"]["missing"] == 0, mixed
+    # 无相机（空字典）→ 合格（未启用相机时不应误判）
+    assert check_images({}, 300)["ok"]
+    print("  PASS: 相机帧完整性检查")
+
+
 if __name__ == "__main__":
     print("=" * 52)
     print("M1 Episode Quality Tests")
@@ -162,6 +180,7 @@ if __name__ == "__main__":
         ("interval stats", test_interval_stats),
         ("dataset stats + report", test_dataset_stats_and_report),
         ("threshold override", test_threshold_override),
+        ("image completeness check", test_image_check),
     ]
     passed = 0
     for name, fn in tests:
