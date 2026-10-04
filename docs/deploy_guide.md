@@ -335,6 +335,20 @@ python3 tools/dataset_stats.py data/raw --all-tasks          # 全部任务
 输出：条数/合格数、总帧数与总时长、帧率 min/mean、逐关节 min/max/幅度/均值/追踪误差、
 **标定行程覆盖率**（数据幅度 ÷ 标定行程，<30% 提示"数据多样性不足"），并列出不合格条目及原因。
 
+### 8.4.1 每集审核卡片（人工 Approve 闭环）
+
+参考 so101-nexus 的"录完人工审核才入库"流程（我方落地为静态卡片，无需 GUI）。采集时**每集自动生成**
+`review/episode_XXXX_review.jpg`：各相机抽样帧拼图 + `J*`（主臂指令，实线）与 `F*`（从臂实际，虚线）
+关节曲线 + 底部质检结论（帧率/丢帧/追踪误差/图像帧数/合格与否）。采集流程里打印卡片路径，
+事后可批量重生成：
+
+```bash
+python3 tools/episode_review.py data/raw/pick_place              # 全部集
+python3 tools/episode_review.py data/raw/pick_place --frames 8   # 每相机抽样帧数
+```
+采集时用 `--no-review` 可关闭。判读：曲线两线贴合=跟随好；`F*` 明显滞后/超调=该关节机械或供电问题；
+抽帧里夹爪没夹住/物体不在视野=该集应 Discard 重录。
+
 ### 8.5 训练格式转换（PC 端）
 
 ```bash

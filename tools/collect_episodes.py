@@ -113,6 +113,8 @@ def main() -> int:
                     help="相机配置 JSON（含 cameras 列表: realsense/usb）")
     ap.add_argument("--no-camera", action="store_true", help="本次不录图像（仅关节）")
     ap.add_argument("--jpeg-quality", type=int, default=90)
+    ap.add_argument("--no-review", action="store_true",
+                    help="不生成每集审核卡片（默认 <task>/review/episode_XXXX_review.jpg）")
     args = ap.parse_args()
 
     thresholds = {
@@ -246,6 +248,8 @@ def main() -> int:
 
                 out = task_dir / f"episode_{idx:04d}.json"
                 pair.save(frames, str(out), duration_s=m["duration_s"])
+
+                # 每集审核卡片（抽样帧拼图 + 关节/追踪曲线 + 质检结论）→ 人工 Approve 依据
                 entry = {
                     "index": idx,
                     "file": out.name,
@@ -258,6 +262,18 @@ def main() -> int:
                     "accepted_by_user": accepted_by_user,
                     "recorded_at": datetime.datetime.now().isoformat(timespec="seconds"),
                 }
+                if not args.no_review:
+                    try:
+                        from tools.episode_review import build_card
+                        card = build_card(out, task_dir / "review" /
+                                          f"{out.stem}_review.jpg",
+                                          target_fps=args.fps,
+                                          requested_s=args.episode_time)
+                        entry["review_card"] = str(Path(card["card"]).name)
+                        print(f"  审核卡片: {card['card']}")
+                    except Exception as e:
+                        print(f"  ⚠ 审核卡片生成失败（不影响数据）: {e}")
+
                 manifest["episodes"] = [e for e in manifest["episodes"]
                                         if e["index"] != idx] + [entry]
                 manifest["episodes"].sort(key=lambda e: e["index"])

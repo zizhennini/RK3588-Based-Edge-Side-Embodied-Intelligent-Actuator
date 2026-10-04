@@ -1,5 +1,37 @@
 # 开发日志 (CHANGELOG)
 
+## 开源项目参考评估 + 每集审核闭环（2026-09-27）
+
+对用户收集的 9 个开源项目快照（`D:\Project\RK3588\开源项目（部分）\`，仓库外）做只读评估，
+结论沉淀为 **`docs/open_source_reference.md`**（逐项目结论 + 21 条采纳清单 + 明确不采纳清单 + 路径证据）。
+
+### 新增
+- **`docs/open_source_reference.md`**：9 个快照的定位/版本/可采纳点/不适用原因；含板端只读核查命令（§5）
+  与待验证问题（§6）
+- **`tools/episode_review.py`**：每集审核卡片生成（抽样帧拼图 + `J*`/`F*` 关节曲线 + 质检结论 → 单张 PNG），
+  落地 so101-nexus 的"人工 Approve 才入库"闭环；采集流程**每集自动生成**（`--no-review` 可关）
+
+### 关键结论（影响 M1/M2 决策）
+- **标定语义已被独立证实与 LeRobot 等价**（so101-nexus `normalization.py:121-126`：零点=行程中点）
+  ⇒ 无需为训练改标定语义
+- **"板端禁 torch"有解**：对标 bundle `openEuler/IB_Robot_ACT_banana_pick_distill` 的 ONNX 图内
+  不含归一化，两个 processor stats 合计仅 15KB ⇒ 归一化可用纯 numpy 复现
+- **RK3588 上 ACT 实测延迟**：RKNN 推理 ~470ms / 端到端 ~570ms（chunk 100 → 5s 缓冲，余量充足）；
+  另 act-starryos 实测**预处理 96.5ms vs NPU 33.7ms** ⇒ 瓶颈在预处理，M3 需分段埋点
+- **量化必须真板验收**：模拟器判定"无损"的 hybrid 在真 NPU 上反而最差（右召回 3/19 vs fp16 18/19）⇒ 默认 fp16
+- **M1 两条红线**：① ACT **不做 resize**，图像按训练分辨率进 ResNet-18 ⇒ **分辨率锁死 640×480**；
+  ② 夹爪单位陷阱——整向量 `deg2rad` 却把夹爪当百分比会**静默只毁夹爪**，我方约定**全 6 维统一弧度**，
+  训练与板端推理必须一致
+- **"50 条 episode"唯一支持性数据点**：lerobot 官方 `docs/source/act.mdx:29`"50 条演示常能出效果"
+  （IB_Robot 侧完全未公布条数建议）⇒ 仍按帧质量指标自检，不当作保证
+- 我方采集侧**已优于上游 lerobot**：上游录制循环无丢帧检测、多相机无共同时间戳；我方有四道质量门控 +
+  每帧 `ct_<cam>` 相机时间戳
+- 明确不采纳：StarryOS 路线、地瓜 BPU 工具链、IB_Robot 的 ROS2/`third_party`、
+  现在就换硬件编码 mp4（与 v3 规范契合度未验证）、纯 ctypes 绑 RGA
+
+### 文档
+- `docs/deploy_guide.md` 新增 §8.4.1（每集审核卡片）
+
 ## 双臂相机接入 + 采集侧性能修正（2026-09-27）
 
 M1 相机确定：**双视角** —— `front`=D435i 第三人称固定（与既有手眼标定一致）+
