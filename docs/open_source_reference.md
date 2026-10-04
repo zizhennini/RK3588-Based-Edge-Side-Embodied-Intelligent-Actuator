@@ -282,20 +282,28 @@ GraspGen 延迟兼容、LeKiwi 运行时。
 | 把"50 条 episode"当作已验证经验值 | IB_Robot 未公布任何条数建议；**唯一支持性数据点是 lerobot 官方 `docs/source/act.mdx:29`"50 条演示常能出效果"**（经验说法，非保证）→ 仍应按帧质量指标自检 |
 | 照抄 lerobot-rk3588 快照的依赖与跨机通道 | 该快照版本比我们旧（0.4.0 发布前）、`datasets/` 缺失；其跨机 TCP 动作通道无过期判定与时间戳对齐（会引入标签噪声）；`pyproject.toml:122` 本地路径 pin 会让 pip 失败 |
 
-## 5. 待办（板端只读核查，决定 §2.6/§2.7 能否立即走通）
+## 5. 板端能力核查（已执行，2026-10-04，板端 `192.168.137.100`）
 
-板端目前网络不可达（连续 ssh 超时），以下命令待板端恢复后执行：
+| 项 | 实测 | 结论 |
+|---|---|---|
+| 内核 | Linux **5.10.209**（`forlinx@ubuntu20`，BSP 内核） | 满足 MPP/RGA/ffmpeg-rockchip 的 vendor 内核要求 ✓ |
+| `/dev/mpp_service` | 存在（`crw-rw---- root video`） | MPP 硬编解码可用 ✓ |
+| `/dev/rga` | 存在 | RGA 2D 加速可用 ✓ |
+| `/dev/dma_heap/cma` | 存在 | 零拷贝缓冲分配可用 ✓ |
+| ffmpeg | `/usr/bin/ffmpeg`，**自带 `h264_rkmpp` 与 `hevc_rkmpp` 编码器** | **不需要自行编译 ffmpeg-rockchip** |
+| 库 | `librockchip_mpp.so(.1)` + `librga.so(.2)` 系统级已装 | 只差 Python 绑定 |
+| OpenCV | 4.11.0（链接 FFMPEG，GStreamer NO，**构建信息无 RGA/MPP**） | `cv2.resize/cvtColor` **不走 RGA** ⇒ 卸载需自写绑定 |
+| Python | 3.10 + numpy 1.26.4 | 符合板端红线（无 torch/lerobot） |
+| 串口软链 | 重启后 `so101_leader→ttyACM0`、`so101_follower→ttyACM1`（ttyACM 编号翻转但角色不变） | udev 方案经**重启实测**有效 ✓ |
+| 双相机 | `front`(D435i) 29.2 fps、`wrist`(USB) 27.8 fps（640×480） | 与 30Hz 环匹配 ✓ |
 
-```bash
-cat /proc/version                                   # 是否 Rockchip BSP 内核（5.10/6.1）
-ls -l /dev/rga /dev/mpp_service /dev/dma_heap        # RGA/MPP 设备节点是否存在
-ffmpeg -hide_banner -encoders | grep -i rkmpp        # 是否已有 rkmpp 硬件编码器
-ldconfig -p | grep -E 'librga|rockchip_mpp'          # librga / mpp 库是否就绪
-python3 -c "import cv2;print(cv2.getBuildInformation())" | grep -iE 'rga|mpp|ffmpeg'
-```
-
-判读：若 `/dev/rga` 与 `librga` 就绪且 OpenCV 已带 RGA 后端 → 预处理卸载可低成本落地（采纳 #1 的加速手段）；
-若 ffmpeg 已有 `rkmpp` 编码器 → 视频落盘旁路实验可行。
+**据此修订两条结论**：
+- **§2.6 ffmpeg-rockchip：由"暂缓（需重编 FFmpeg）"改为"成本已降为低"**——系统 ffmpeg 已带
+  `h264_rkmpp`/`hevc_rkmpp`，剩余问题只有"Python 侧如何调用（subprocess）+ 与 LeRobotDataset v3
+  视频规范的契合度验证"。建议 **M1 之后**做一次旁路实验（固定 QP 编码 → 用官方读取路径验证可读），
+  通过再考虑替换 JPEG 序列。
+- **§2.7 librga：设备与库均就绪，但 OpenCV 非 RGA 版** ⇒ 预处理卸载仍需 C 扩展或 ctypes 自绑。
+  建议 M3 先做**分段计时**（decode / preprocess / NPU / postprocess），只在预处理确为瓶颈时再投入。
 
 ## 6. 待验证问题
 

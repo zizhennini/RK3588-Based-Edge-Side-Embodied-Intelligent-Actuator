@@ -1,5 +1,24 @@
 # 开发日志 (CHANGELOG)
 
+## 板端恢复 + 硬件加速能力核查（2026-10-04）
+
+板端换址恢复访问（**有线 `192.168.137.100`** / 无线 `10.1.27.13`；旧 `10.1.27.9` 失效），
+完成全量同步与只读能力核查。
+
+### 核查结论（详见 `docs/open_source_reference.md` §5）
+- 内核 **Linux 5.10.209（forlinx BSP）**；`/dev/mpp_service`、`/dev/rga`、`/dev/dma_heap/cma` 均在
+- **`ffmpeg` 自带 `h264_rkmpp` / `hevc_rkmpp`** ⇒ **无需自行编译 ffmpeg-rockchip**（原"暂缓"理由之一消失，
+  视频落盘旁路实验成本由高降为低）
+- `librockchip_mpp.so` + `librga.so` 系统级已装；但 **OpenCV 4.11.0 非 RGA 版**（构建信息无 RGA/MPP）
+  ⇒ 预处理卸载仍需 C 扩展/ctypes，M3 先做分段计时再决定是否投入
+- **udev 串口软链经重启验证有效**：ttyACM 编号再次翻转（leader→ttyACM0），角色绑定不变
+
+### 同步与验证
+- 板端 md5 与仓库 **21/21 一致**；`episode_review.py`/`collect_episodes.py` 编译通过
+- 板端单测：`test_episode_quality.py` **10/10**、`test_feetech_bus.py` **14/14**
+- 双相机实测：`front`(D435i) **29.2 fps**、`wrist`(USB) **27.8 fps**（640×480）；取景图已回传确认
+  （`_deploy/cam_preview/`，front 视角偏左、末端腕部视角良好）
+
 ## 开源项目参考评估 + 每集审核闭环（2026-09-27）
 
 对用户收集的 9 个开源项目快照（`D:\Project\RK3588\开源项目（部分）\`，仓库外）做只读评估，
