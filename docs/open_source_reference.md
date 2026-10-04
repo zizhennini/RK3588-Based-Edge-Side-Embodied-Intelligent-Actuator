@@ -111,6 +111,42 @@
   ⇒ 我方 M1 的"50 条"只能当**待验证假设**，用帧质量指标（关键帧/冻结帧占比）做采集端自检，而不是只数条数。
   另：其配置 50 万步却只发布 16 万步 student ⇒ **M2 要按 eval 曲线挑 checkpoint，不要取最后一个**。
 
+#### 2.4.1 上游版本核对（2026-09-27 实查 HF / GitCode）
+
+| 对象 | 本地快照 | 上游最新 | 结论 |
+|---|---|---|---|
+| HF `openEuler/IB_Robot_ACT_banana_pick_distill` | `5ccab2fe`（2026-08-26） | **`5ccab2fe`（2026-08-26）** | **未更新，本地即最新**（4 次提交：06-30 初始 → 07-28 加 Ascend OM+RKNN → 08-26 补 manifest） |
+| HF `openEuler/IB_Robot_ACT_banana_pick` | — | `37549a4d`（**2026-09-08**） | **新版，结构更完整（见下）** |
+| HF `openEuler/IB_Robot_ACT_dual_arm_banana_pick` | — | `21662c68`（**2026-09-08**） | **双臂版**（12 维 + 3 相机） |
+| GitCode `openeuler/IB_Robot`（源码） | `b2d87d7c`（2026-09-17） | **`f208ee90`（2026-09-30）** | **落后 19 个提交**（见下） |
+
+**新版单臂 bundle（09-08）比我方参考的 distill 版更有参考价值**——它同时含**教师与蒸馏学生**：
+
+| | distill（08-26） | banana_pick（09-08） |
+|---|---|---|
+| 目录布局 | 平铺 + `inference_manifest.json` | **`pytorch_model/` + `rknn_model/`**（各自带 `config.json`） |
+| PyTorch 侧结构 | dim_model 1024 / dec 2 / ffn 1200（学生） | **dim_model 2048 / dec 7 / ffn 3200（教师）** |
+| RKNN 侧结构 | 单独 `artifacts/rknn/rk3588/policy-*.rknn` | **`rknn_model/act_ros2_rknn.rknn` + config**：dim_model 1024 / dec 2（学生）、`kd: true`、`pretrained_path: ./models/502000/pretrained_model` |
+| 输入契约 | state 6 + top/wrist `[3,480,640]` | PyTorch: state 6 + top/wrist `[3,480,640]`；**RKNN: state 6 + `observation.current` 6 + `hand_view`/`top_view` `[3,240,320]`** |
+| 训练配置 | steps 500000、KD/ada_weight、batch 60 | `steps=500000, batch_size=16, seed=1000, num_workers=10, save_freq=10000`；数据集 `1arm_2cam_banana_pick_v1_20260514`（本地路径，非 HF）；**`image_transforms.enable=false`**（无图像增强）；`use_imagenet_stats=true`；`video_backend=torchcodec` |
+
+值得注意的三点（**采纳前需自行验证**）：
+
+1. **RKNN 契约 ≠ PyTorch 契约**（相机名 `hand_view/top_view`、分辨率 240×320、多一路 `observation.current`）
+   ⇒ 说明其 RKNN 产物是从**另一次训练/微调**导出的，不是同一份权重的直接转换。
+   **对我方的教训**：导出 RKNN 时必须**用编译期 ABI JSON 校验输入名/顺序/形状**，不能假设"和训练配置一样"。
+2. **`observation.current` 作为额外状态输入**（6 维，电机电流）——与我们 §3 #10 的帧质量门控同源信号；
+   我方协议层已能读 `Present_Current`，M2 可评估是否加入观测。
+3. 部署侧用 **240×320**（3 相机时）/480×640（2 相机时）：分辨率越低 NPU 越省，但**必须与模型训练分辨率一致**
+   （ACT 不做 resize，见 §2.8）。
+
+**源码仓库 IB_Robot 的 19 个新提交**（2026-09-17 → 09-30，摘要）：imitation retargeting 包 +
+"play retargeted imitation plans as one trajectory"、HRI 执行器由 YOLOX/PEAR 驱动、
+`ibrobot_msgs` 增加 YOLOX/PEAR/trace-id 服务契约、embodied agent 计划控制面 + tracing、
+GraspGen 延迟兼容、LeKiwi 运行时。
+⇒ 近期重心在**感知/执行/Agent 编排**而非 ACT 训练本身；与我们 M1/M2 直接相关的只有
+"imitation retargeting（把演示轨迹重定向到本体）"一条，M3 再评估。
+
 ### 2.5 act-starryos-rk3588（C++ / Rust 两版）—— 借推理工程与量化教训
 
 - 前提：两者是同一"智能车判向"竞赛项目的两个提交版本，**任务不是机械臂**

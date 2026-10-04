@@ -31,6 +31,10 @@
 
 ### 文档
 - `docs/deploy_guide.md` 新增 §8.4.1（每集审核卡片）
+- `docs/open_source_reference.md` §2.4.1：**上游版本实查**——`IB_Robot_ACT_banana_pick_distill`
+  本地即最新（`5ccab2fe`/2026-08-26，后续无提交）；同组织有更新的 `IB_Robot_ACT_banana_pick`
+  与 `IB_Robot_ACT_dual_arm_banana_pick`（2026-09-08，含**教师+蒸馏学生**与 RKNN 产物）；
+  源码仓库 `openeuler/IB_Robot` 上游领先本地快照 **19 个提交**（至 2026-09-30，重心在感知/执行/Agent 编排）
 
 ## 双臂相机接入 + 采集侧性能修正（2026-09-27）
 
