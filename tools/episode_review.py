@@ -34,12 +34,37 @@ LINE_COLORS = [(66, 133, 244), (219, 68, 55), (244, 180, 0), (15, 157, 88),
                (171, 71, 188), (0, 172, 193)]
 
 
-def _thumb(path: Path):
+def _workspace_poly():
+    """读取 cam_align 工具标定的工作区多边形 → (camera_name, np.ndarray) 或 (None, None)
+
+    由 tools/cam_align_d435i.py 生成 config/cam_align.json；审核卡片把它画在对应相机的帧上，
+    便于一眼判断物体/夹爪是否落在工作区内（采集一致性）。
+    """
+    cfg = Path("config/cam_align.json")
+    if not cfg.exists():
+        return None, None
+    try:
+        with open(cfg, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        if d.get("corners"):
+            return d.get("camera"), np.array(d["corners"], dtype=np.float32)
+    except Exception:
+        pass
+    return None, None
+
+
+def _thumb(path: Path, poly=None, src_wh=None):
+    """读图缩放为缩略图；给出多边形时按比例叠加工作区标记"""
     import cv2
     img = cv2.imread(str(path))
     if img is None:
         return None
-    return cv2.resize(img, (THUMB_W, THUMB_H), interpolation=cv2.INTER_AREA)
+    th = cv2.resize(img, (THUMB_W, THUMB_H), interpolation=cv2.INTER_AREA)
+    if poly is not None and src_wh:
+        sx, sy = THUMB_W / src_wh[0], THUMB_H / src_wh[1]
+        p = (poly * np.array([sx, sy], dtype=np.float32)).astype(np.int32)
+        cv2.polylines(th, [p], True, (0, 165, 255), 1, cv2.LINE_AA)
+    return th
 
 
 def _label(img, text: str, y: int = 20):
@@ -118,13 +143,22 @@ def build_card(episode_json: Path, out_path: Path, n_frames: int = 6,
             q["reasons"] += iq["reasons"]
 
     rows = []
+    poly_cam, poly = _workspace_poly()
     for cam, files in cams.items():
         if not files:
             continue
+        use_poly, src_wh = (poly, None) if (poly is not None and cam == poly_cam) \
+            else (None, None)
+        if use_poly is not None:
+            probe = cv2.imread(str(files[0]))
+            if probe is not None:
+                src_wh = (probe.shape[1], probe.shape[0])
+            else:
+                use_poly = None
         idx = np.linspace(0, len(files) - 1, min(n_frames, len(files))).astype(int)
         tiles = []
         for k in idx:
-            th = _thumb(files[k])
+            th = _thumb(files[k], use_poly, src_wh)
             if th is None:
                 th = np.full((THUMB_H, THUMB_W, 3), 40, np.uint8)
                 th = _label(th, "读图失败")

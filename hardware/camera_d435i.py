@@ -37,6 +37,18 @@ class FrameBuffer:
             rgb, depth, ts = self._latest
             return rgb.copy(), depth.copy(), ts
 
+    def get_rgb_ts(self) -> Optional[tuple[np.ndarray, float]]:
+        """仅取 RGB + **该帧自身的时间戳**（不拷贝深度，供高频采集路径使用）
+
+        与 get_frame() 的区别：不复制深度图（640×480 float32 ≈ 1.2MB/次），
+        且返回真实采集时刻，便于采集端判断"是否新帧"与记录 ct_<cam>。
+        """
+        with self._lock:
+            if self._latest is None:
+                return None
+            rgb, _depth, ts = self._latest
+            return rgb.copy(), ts
+
     @property
     def has_frame(self) -> bool:
         with self._lock:
@@ -263,6 +275,10 @@ class CameraManager(HardwareModule):
         """仅获取 RGB 帧"""
         frame = self._frame_buffer.get_frame()
         return frame[0] if frame else None
+
+    def get_rgb_ts(self) -> Optional[tuple[np.ndarray, float]]:
+        """仅获取 RGB 帧与该帧自身时间戳 (rgb, ts)（不复制深度图）"""
+        return self._frame_buffer.get_rgb_ts()
 
     def get_depth(self) -> Optional[np.ndarray]:
         """仅获取深度帧（单位：米）"""

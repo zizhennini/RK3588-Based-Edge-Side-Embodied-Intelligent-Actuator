@@ -229,11 +229,13 @@ class CameraSet:
         if cam is None:
             return None
         if self._kind[name] == "realsense":
-            rgb = cam.get_rgb()
-            if rgb is None:
+            # 用**帧自身时间戳**（而非调用时刻）：采集端据此判断是否新帧、记录 ct_<cam>
+            got = cam.get_rgb_ts()
+            if not got:
                 return None
+            rgb, ts = got
             view = rgb[:, :, ::-1]
-            return (view.copy() if copy else view), time.perf_counter()
+            return (view.copy() if copy else view), ts
         got = cam.latest(copy=copy)
         return got
 
