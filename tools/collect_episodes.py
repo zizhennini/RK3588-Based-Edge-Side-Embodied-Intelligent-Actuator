@@ -146,6 +146,18 @@ def main() -> int:
         with open(manifest_path, "r", encoding="utf-8") as f:
             manifest = json.load(f)
         manifest.setdefault("episodes", [])
+        # 本次运行的参数覆盖旧值：否则改了 --episode-time 等参数后，门控仍按旧口径判定
+        # （曾出现：manifest 留着上次的 12.0，而本次按 15.0 判"时长不足"）
+        manifest.update({
+            "task": args.task,
+            "episode_time_s": args.episode_time,
+            "target_fps": args.fps,
+            "max_step_deg": args.max_step,
+            "leader_calib": args.leader_calib,
+            "follower_calib": args.follower_calib,
+            "thresholds": thresholds,
+            "params_updated": datetime.datetime.now().isoformat(timespec="seconds"),
+        })
     else:
         manifest = {
             "task": args.task,
