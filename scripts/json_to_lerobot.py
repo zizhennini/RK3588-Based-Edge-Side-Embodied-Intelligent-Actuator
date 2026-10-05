@@ -3,13 +3,20 @@
 """scripts/json_to_lerobot.py — 遥操作录制 JSON → 训练数据（PC 端运行）
 
 输入: scripts/lerobot-record-lite 或 hardware.teleop.TeleopPair 输出的 JSON
-      {"fps": 30, "frames": [{"J1": deg, ..., "J6": deg, "t": sec}, ...]}
+      {"fps": 30, "frames": [{"J1": deg, ..., "J6": deg, "F1": deg, ..., "F6": deg, "t": sec}, ...]}
+
+**特征语义（imitation learning 约定，勿弄反）**:
+      action            ← J1..J6（主臂指令 / 下发给从臂的目标）
+      observation.state ← F1..F6（从臂实际角度，= 机器人本体状态）
+      缺 F* 的历史数据退回用 J* 作 state，并打印告警
+      （LeRobot ACT 由数据集特征键推断 input/output features：无 `action` 会在训练时报
+       action_feature=None 崩溃）
 
 两种输出格式:
   --format npz（默认，仅 numpy）:
-      <out>/<name>.npz  state=(N,6) float32 弧度 + timestamps + meta JSON
-  --format lerobot（需 PC 端 lerobot env, pip lerobot）:
-      LeRobotDataset v2.x（API 写入，自动兼容 0.4.x/0.6.x import 路径）
+      <out>/<name>.npz  action=(N,6) + state=(N,6) float32 弧度 + timestamps + meta JSON
+  --format lerobot（需 PC 端 lerobot env, pip 'lerobot[dataset]'）:
+      LeRobotDataset v3（API 写入，自动兼容 0.4.x/0.6.x import 路径）
       每个输入文件 = 一个 episode
 
 用法:
@@ -90,25 +97,44 @@ def load_image(path: Path):
 
 
 def load_episode(path: Path) -> dict:
-    """读取录制 JSON → {"fps": int, "state": (N,6) 弧度, "timestamps": (N,)}"""
+    """读取录制 JSON → {"action": (N,6), "state": (N,6), "timestamps": (N,)}（弧度）
+
+    语义（**imitation learning 约定**，勿弄反）：
+      - `J1..J6`（遥操作时主臂角度，= 下发给从臂的目标）= **action**（策略要输出的动作）
+      - `F1..F6`（从臂实际角度，= 机器人本体状态）= **observation.state**（策略推理时的输入）
+    LeRobot ACT 的 `input_features`/`output_features` 由数据集特征键推断（`action` → ACTION），
+    若数据集缺 `action`，训练会在 `modeling_act.py` 以 `action_feature=None` 崩溃。
+    历史数据缺 `F*` 时退回用 `J*` 作 state 并告警（可训练但状态含目标值，精度会受影响）。
+    """
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     frames = data.get("frames", [])
     if not frames:
         raise ValueError(f"{path}: frames 为空")
-    state_deg = []
-    timestamps = []
+    act_deg, state_deg, timestamps = [], [], []
+    missing_state = 0
     for fr in frames:
         try:
-            row = [float(fr[f"J{i}"]) for i in range(1, 7)]
+            act = [float(fr[f"J{i}"]) for i in range(1, 7)]
         except (KeyError, TypeError):
             continue  # 丢帧（个别关节读取失败）跳过
-        state_deg.append(row)
+        try:
+            st = [float(fr[f"F{i}"]) for i in range(1, 7)]
+        except (KeyError, TypeError):
+            st = list(act)
+            missing_state += 1
+        act_deg.append(act)
+        state_deg.append(st)
         timestamps.append(float(fr.get("t", len(timestamps) / data.get("fps", 30))))
-    state = np.deg2rad(np.asarray(state_deg, dtype=np.float32))
+    if not act_deg:
+        raise ValueError(f"{path}: 无有效帧（缺 J1..J6）")
+    if missing_state:
+        print(f"⚠ {path.name}: {missing_state}/{len(act_deg)} 帧缺 F*（从臂实际），"
+              f"该部分 observation.state 退回用 action 填充")
     return {
         "fps": int(data.get("fps", 30)),
-        "state": state,
+        "action": np.deg2rad(np.asarray(act_deg, dtype=np.float32)),
+        "state": np.deg2rad(np.asarray(state_deg, dtype=np.float32)),
         "timestamps": np.asarray(timestamps, dtype=np.float32),
         "source": str(path),
     }
@@ -120,6 +146,7 @@ def save_npz(episodes: list, out_dir: Path) -> None:
         name = Path(ep["source"]).stem
         np.savez_compressed(
             out_dir / f"{name}.npz",
+            action=ep["action"],
             state=ep["state"],
             timestamps=ep["timestamps"],
             meta=json.dumps({
@@ -128,6 +155,7 @@ def save_npz(episodes: list, out_dir: Path) -> None:
                 "joint_names": JOINT_NAMES,
                 "source": ep["source"],
                 "total_frames": len(ep["state"]),
+                "semantics": "action=J*(主臂指令) state=F*(从臂实际)",
             }, ensure_ascii=False),
         )
         print(f"✓ {out_dir / (name + '.npz')}  ({len(ep['state'])} 帧)")
@@ -147,6 +175,13 @@ def save_lerobot(episodes: list, repo_id: str, task: str, root: Path,
 
     fps = episodes[0]["fps"]
     features = {
+        # action = J*（主臂指令 / 下发给从臂的目标）；缺它 ACT 训练会 action_feature=None 崩
+        "action": {
+            "dtype": "float32",
+            "shape": (6,),
+            "names": JOINT_NAMES,
+        },
+        # observation.state = F*（从臂实际角度）
         "observation.state": {
             "dtype": "float32",
             "shape": (6,),
@@ -189,7 +224,10 @@ def save_lerobot(episodes: list, repo_id: str, task: str, root: Path,
         last_img = {}
         n_missing = 0
         for i in range(len(ep["state"])):
-            frame = {"observation.state": ep["state"][i]}
+            frame = {
+                "action": ep["action"][i],
+                "observation.state": ep["state"][i],
+            }
             for c in cam_names:
                 files = cams.get(c) or []
                 if i < len(files):

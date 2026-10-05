@@ -45,6 +45,7 @@ class ACTPolicy(PolicyModule):
         self._config: dict = {}
         self._query_embed: Optional[np.ndarray] = None  # (chunk_size, 512)
         self._norm_stats: dict = {}
+        self._warned_no_norm: bool = False   # 图像归一化常量缺失只告警一次
         self._action_buffer: list = []
         self._buffer_lock = threading.Lock()
         self._chunk_size: int = 100
@@ -341,14 +342,36 @@ class ACTPolicy(PolicyModule):
             img = img[..., :3]
 
         img = img.astype(np.float32) / 255.0
-        # 可选 ImageNet 归一化（训练使用 torchvision 时常见）
+        # ImageNet/数据集图像归一化 —— **必须**与训练侧一致：
+        # 官方 lerobot 在 normalizer_processor 里对 VISUAL 做 MEAN_STD
+        # （use_imagenet_stats=true 时即 ImageNet 常量），导出的 vision_encoder 图内不再含归一化，
+        # 因此这里漏掉会静默喂错尺度 → 动作全错。
+        # 优先读顶层 image_mean/image_std；缺失时从导出的 norm_stats.images 推导（各相机相同）。
         mean = self._config.get("image_mean")
         std = self._config.get("image_std")
+        if mean is None or std is None:
+            images = (self._norm_stats or {}).get("images") or {}
+            for cam in sorted(images):
+                m = (images[cam] or {}).get("mean")
+                s = (images[cam] or {}).get("std")
+                if m and s:
+                    mean, std = m, s
+                    logger.info("图像归一化常量取自 norm_stats.images.%s: mean=%s std=%s",
+                                cam, [round(float(x), 4) for x in m],
+                                [round(float(x), 4) for x in s])
+                    break
         if mean is not None and std is not None:
             mean_arr = np.asarray(mean, dtype=np.float32).reshape(1, 1, 3)
             std_arr = np.asarray(std, dtype=np.float32).reshape(1, 1, 3)
             std_arr = np.where(np.abs(std_arr) < 1e-6, 1.0, std_arr)
             img = (img - mean_arr) / std_arr
+        elif not self._warned_no_norm:
+            # 无法确定归一化常量：值域错误会让策略输出完全失真的动作，必须显式告警
+            logger.warning(
+                "未找到图像归一化常量（act_config.json 的 image_mean/image_std 或 "
+                "norm_stats.images 均缺失）——将按裸 [0,1] 输入，若训练使用了 ImageNet "
+                "统计量则动作会失真；请用 tools/export_act_onnx.py 重新导出")
+            self._warned_no_norm = True
 
         img = np.ascontiguousarray(img.transpose(2, 0, 1))  # HWC → CHW
         return np.expand_dims(img, 0).astype(np.float32)    # → (1,3,H,W)
@@ -419,6 +442,8 @@ class ACTPolicy(PolicyModule):
         mean = mean[:self._action_dim]
         std = std[:self._action_dim]
         std = np.where(np.abs(std) < 1e-6, 1.0, std)
+        # 与官方 lerobot normalizer_processor 对齐：denom = std + eps (eps=1e-8)
+        std = std + 1e-8
         return mean, std
 
     def _normalize_state(self, state: np.ndarray) -> np.ndarray:

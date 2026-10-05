@@ -1,5 +1,58 @@
 # 开发日志 (CHANGELOG)
 
+## M2/M3 训练与导出链路打通（2026-10-05）
+
+相机支架在打印，先做与相机无关的 M2/M3。**端到端已跑通并实测**（合成数据冒烟）。
+新增文档 `docs/m2_m3_training_export_guide.md`。
+
+### 打通链路
+`遥操作 JSON → LeRobotDataset v3 → lerobot-train(ACT) → export_act_onnx → 板端 ORT 推理`
+
+- 环境：WSL2 conda env `rk3588`（**Python 3.12.14 + lerobot 0.6.1 + torch 2.11.0**）；
+  GPU 为 RTX 4060 Laptop 8GB（该 env 目前是 CPU 版 torch）
+- **缺两个可选依赖导致运行时报错**（已实测并写入 requirements-dev.txt）：
+  `pip install "lerobot[dataset]"`（datasets/pyarrow/av/torchcodec）、
+  `pip install "lerobot[training]"`（accelerate/wandb/einops/torchvision）
+- 训练冒烟：ACT **52M 参数**，loss **85.98 → 27.54**（l1+kld，VAE 生效），CPU 约 1.6~1.8 s/step
+- 关键开关：**`--policy.push_to_hub=false` 必须显式给**（0.6.1 默认 true，缺 `repo_id` 会在
+  `configs/train.py::validate()` 报错；顶层 `--repo_id` 不是合法参数）
+
+### 修复（都是"静默错误"，靠交叉验证才发现）
+1. **`scripts/json_to_lerobot.py` 特征语义错误（严重）**：原先把 `J*`（主臂指令）写成
+   `observation.state` 且**完全没有 `action`** → 训练在 `modeling_act.py` 以
+   `action_feature=None → NoneType.shape` 崩溃（官方按特征键推断 output_features）。
+   现改为 `action ← J*`、`observation.state ← F*`（从臂实际）；缺 `F*` 时退回并告警。
+   `--format npz` 同步输出 action+state。
+2. **`tools/export_act_onnx.py` 取不到 `norm_stats`**：lerobot 0.6.1 把归一化搬到
+   pre/postprocessor（`policy_preprocessor_step_N_normalizer_processor.safetensors`），
+   旧版 json 路径取不到 → `norm_stats: null` → 板端无法归一化。
+   新增 `_load_processor_stats()` + 数据集 stats 回退；并新增 `image_mean/image_std` 输出。
+3. **ONNX 实际 opset ≠ 请求值**：torch 2.x 因 `LayerNormalization` 无法降到 14，降级失败后
+   **保持原版本**（实测 **18**），而旧配置仍写 14 → 误导板端。现记录
+   `onnx_opset`(实际) + `onnx_opset_requested`(请求) 并告警。
+4. **图像归一化语义（会静默降低精度）**：导出图的 ResNet18 主干**不含**归一化，官方是在
+   preprocessor 里用 ImageNet 常量对 VISUAL 做 MEAN_STD，故 ONNX 输入应是
+   `(x/255 - image_mean)/image_std` 而非裸 `[0,1]`（原注释写错）。
+   导出侧写入 `image_mean/image_std`；板端 `policy/act_policy.py` 缺顶层键时从
+   `norm_stats.images` 推导，两者都没有则显式告警；`_get_norm_arrays` 补 `+1e-8` 与官方 `denom=std+eps` 对齐。
+
+### 官方核对（避免自造轮子）
+- 官方 lerobot **没有任何 ONNX 导出实现**（包内无 `*onnx*`、无 `torch.onnx.export`）→ 自研导出是唯一路径
+- 官方 MEAN_STD 语义：`denom = std + eps(1e-8)`
+- 官方 ACT 推理：`_action_queue = deque(maxlen=n_action_steps)`，队列空才 `predict_action_chunk()`；
+  可选 `temporal_ensemble_coeff`（权重 `wᵢ=exp(-coeff·i)`）
+
+### 实测验证
+| 项 | 结果 |
+|---|---|
+| 导出分模块数值校验 | vision `max_diff<1e-4`、transformer `max_diff<1e-4`、端到端 **5.2e-07** |
+| 板端(RK3588/ORT 1.23.2) vs PC 参考 | vision `max\|Δ\|=5.7e-06`、actions `max\|Δ\|=6.6e-07` |
+| 板端延迟（10 次中位） | vision **364ms** + transformer **152ms** = **619ms（1.62Hz）** |
+| 可行性 | chunk=100 步按 30Hz 执行需 3.33s ≫ 0.619s，**约 5 倍余量** |
+
+### 待办
+- 换 CUDA 版 torch（或新建训练 env）后跑真数据；相机支架到位后开始 M1 采集
+
 ## D435i 官方/开源调研落地（2026-10-05）
 
 两路调研归档：`docs/realsense_d435i_official_survey.md`（Intel/RealSense 官方数据手册+文档+librealsense 源码取证）、

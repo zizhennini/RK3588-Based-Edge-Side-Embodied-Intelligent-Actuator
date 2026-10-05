@@ -12,6 +12,15 @@
 #   - onnx >=1.14: 支持 ACT 导出所需 opset 14+（scaled_dot_product_attention）
 #     与 GGCNN 的 opset 12
 # =====================================================================
+# 训练/转换额外依赖（2026-10 实测）：
+#   lerobot 0.6.1 把数据集栈与训练栈做成**可选依赖**，缺了会在运行时才报
+#   ImportError('datasets' is required ... / 'accelerate' is required ...)：
+#       pip install "lerobot[dataset]"     # datasets / pyarrow / av / torchcodec
+#       pip install "lerobot[training]"    # accelerate / wandb / einops / torchvision
+#   实测版本: lerobot 0.6.1, pyarrow 25.0.1, av 15.1.0, datasets 4.8.5,
+#             torchcodec 0.11.1, accelerate 1.15.0（WSL2 env `rk3588`, py3.12.14）
+#   详见 docs/m2_m3_training_export_guide.md
+# =====================================================================
 torch>=2.0
 torchvision>=0.15
 onnx>=1.14

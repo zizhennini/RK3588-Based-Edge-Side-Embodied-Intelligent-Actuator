@@ -254,7 +254,11 @@ class ACTModel(nn.Module):
 class VisionEncoderModule(nn.Module):
     """Module 1: 图像 → 视觉特征图
 
-    输入:  image           (1, 3, 480, 640) float32  [0,1] 归一化
+    输入:  image           (1, 3, 480, 640) float32
+                          **ImageNet 归一化后的值**：(x/255 - mean) / std，
+                          mean/std 见 act_config.json 的 image_mean/image_std
+                          （官方 lerobot 在 normalizer_processor 里对 VISUAL 做 MEAN_STD；
+                           本图内的 ResNet18 主干不含归一化，切勿喂裸 [0,1]）
     输出:  vision_features (1, 512, 15, 20)  float32
     """
 
@@ -603,30 +607,178 @@ def load_config(ckpt_dir: Path) -> dict[str, Any]:
     return cfg
 
 
+def _first_cam_stat(norm_stats: dict | None, stat: str) -> list | None:
+    """取**任一相机**的图像归一化常量（各相机相同，use_imagenet_stats 时即 ImageNet 值）"""
+    if not norm_stats:
+        return None
+    images = norm_stats.get("images") or {}
+    for cam in sorted(images):
+        v = (images[cam] or {}).get(stat)
+        if v:
+            return [float(x) for x in v]
+    return None
+
+
+def _load_processor_stats(ckpt_dir: Path, proc_json: str,
+                          registry: str) -> dict:
+    """从 lerobot 0.6.x 的 processor JSON + safetensors 读取归一化统计量
+
+    0.6.x 把归一化搬到了 pre/postprocessor，统计量存在
+    `policy_preprocessor_step_N_normalizer_processor.safetensors` 等文件里，
+    形如 `observation.state.mean` / `action.std` / `observation.images.front.mean`
+    （图像为 (3,1,1) 的逐通道值；`use_imagenet_stats=true` 时即 ImageNet 常量）。
+
+    Returns: {"<feature>": {"mean": [...], "std": [...]}, ..., "_file": "<safetensors 名>"}
+    """
+    pj = ckpt_dir / proc_json
+    if not pj.exists():
+        return {}
+    try:
+        cfg = json.loads(pj.read_text(encoding="utf-8"))
+    except Exception as e:      # noqa: BLE001
+        log.debug("解析 %s 失败: %s", proc_json, e)
+        return {}
+    out: dict = {}
+    for step in cfg.get("steps", []):
+        if step.get("registry_name") != registry:
+            continue
+        sf = ckpt_dir / str(step.get("state_file", ""))
+        if not sf.exists():
+            continue
+        try:
+            from safetensors import safe_open
+            with safe_open(str(sf), framework="pt") as f:
+                for k in f.keys():
+                    if "." not in k:
+                        continue
+                    feat, stat = k.rsplit(".", 1)
+                    if stat not in ("mean", "std"):
+                        continue
+                    arr = f.get_tensor(k).to("cpu").float().numpy()
+                    out.setdefault(feat, {})[stat] = arr.reshape(-1).tolist()
+            out["_file"] = sf.name
+            log.info("已读取归一化统计量: %s (%d 个特征)", sf.name, len(out) - 1)
+        except Exception as e:  # noqa: BLE001
+            log.warning("读取 %s 失败: %s", sf, e)
+    return out
+
+
 def load_norm_stats(ckpt_dir: Path) -> dict | None:
-    """尝试从 checkpoint 目录加载归一化统计量（可选）"""
+    """加载归一化统计量（优先 lerobot 0.6.x processor，回退旧版 json / 数据集 stats）
+
+    Returns: {"state": {mean,std}, "action": {mean,std},
+              "images": {cam: {mean,std}}, "norm_map": {...}, "source": str}
+    """
+    # ① 0.6.x: processor safetensors（当前 lerobot 的实际存储位置）
+    norm = _load_processor_stats(ckpt_dir, "policy_preprocessor.json",
+                                 "normalizer_processor")
+    post = _load_processor_stats(ckpt_dir, "policy_postprocessor.json",
+                                 "unnormalizer_processor")
+    if norm or post:
+        state = norm.get("observation.state") or {}
+        action = norm.get("action") or post.get("action") or {}
+        images = {k.split("observation.images.")[-1]: v for k, v in norm.items()
+                  if k.startswith("observation.images.")}
+        if (state.get("mean") and state.get("std")) or \
+           (action.get("mean") and action.get("std")):
+            norm_map = {"STATE": "MEAN_STD", "ACTION": "MEAN_STD", "VISUAL": "MEAN_STD"}
+            for src in (ckpt_dir / "policy_preprocessor.json",
+                        ckpt_dir / "policy_postprocessor.json"):
+                try:
+                    for step in json.loads(src.read_text(encoding="utf-8")).get("steps", []):
+                        if step.get("registry_name", "").endswith("normalizer_processor"):
+                            norm_map.update(
+                                (step.get("config") or {}).get("norm_map") or {})
+                except Exception:   # noqa: BLE001
+                    pass
+            log.info("归一化统计量: state/action%s（norm_map=%s）",
+                     "+images" if images else "", norm_map)
+            return {"state": state, "action": action, "images": images,
+                    "norm_map": norm_map, "source": norm.get("_file")
+                    or post.get("_file") or "processor safetensors"}
+
+    # ② 旧版 json（<0.6 或手工放置）
     for fname in ("norm_stats.json", "train_config.json", "dataset_stats.json"):
         fpath = ckpt_dir / fname
         if fpath.exists():
             try:
                 with open(fpath, encoding="utf-8") as f:
                     data = json.load(f)
-                # 尝试提取 norm_stats 字段
                 if "norm_stats" in data:
                     log.info("从 %s 加载归一化统计量", fname)
                     return data["norm_stats"]
                 if "mean" in data or "std" in data:
                     log.info("从 %s 加载归一化统计量", fname)
                     return data
-            except Exception as e:
+            except Exception as e:      # noqa: BLE001
                 log.debug("解析 %s 失败: %s", fname, e)
-    log.info("未找到归一化统计量文件（norm_stats.json），配置中 norm_stats 将为 null")
+
+    # ③ 数据集 meta/stats.json（从 train_config.json 解析 dataset root/repo_id）
+    try:
+        tc = json.loads((ckpt_dir / "train_config.json").read_text(encoding="utf-8"))
+        ds_cfg = tc.get("dataset") or {}
+        root = ds_cfg.get("root")
+        cands = []
+        if root:
+            cands.append(Path(str(root).replace("~", str(Path.home()))) / "meta" / "stats.json")
+        if ds_cfg.get("repo_id"):
+            cands.append(Path("datasets") / str(ds_cfg["repo_id"]).split("/")[-1]
+                         / "meta" / "stats.json")
+        for c in cands:
+            if c.exists():
+                d = json.loads(c.read_text(encoding="utf-8"))
+                st, ac = d.get("observation.state") or {}, d.get("action") or {}
+                if st.get("mean") and ac.get("mean"):
+                    log.info("从数据集 %s 加载归一化统计量", c)
+                    return {"state": {"mean": st["mean"], "std": st["std"]},
+                            "action": {"mean": ac["mean"], "std": ac["std"]},
+                            "images": {k.split("observation.images.")[-1]: v
+                                       for k, v in d.items()
+                                       if k.startswith("observation.images.")},
+                            "norm_map": {"STATE": "MEAN_STD", "ACTION": "MEAN_STD",
+                                         "VISUAL": "MEAN_STD"},
+                            "source": str(c)}
+    except Exception as e:      # noqa: BLE001
+        log.debug("从数据集回退加载统计量失败: %s", e)
+
+    log.warning("未找到归一化统计量（0.6.x processor safetensors / 旧版 json / 数据集 stats）"
+                "—— 配置中 norm_stats 将为 null，板端必须自行提供统计量！")
     return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ONNX 导出
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _actual_opset(path: Path) -> int | None:
+    """读取 ONNX 文件里**真实**的 opset（torch 降级失败时会高于请求值）
+
+    torch 2.x 默认导出的 opset 较高（LayerNormalization/Identity 等算子无法降到 14 时，
+    ONNX C API 的版本转换会失败并**保持原版本**）。只记录请求的 opset 会误导板端，
+    故从产物读回真实值。
+    """
+    try:
+        import onnx
+        m = onnx.load(str(path), load_external_data=False)
+        for imp in m.opset_import:
+            if imp.domain in ("", "ai.onnx"):
+                return int(imp.version)
+    except Exception as e:      # noqa: BLE001
+        log.debug("读取 %s 真实 opset 失败: %s", path.name, e)
+    return None
+
+
+def _log_exported(path: Path, size_mb: float, requested: int) -> int | None:
+    """打印导出结果并校验真实 opset；返回真实 opset"""
+    actual = _actual_opset(path)
+    if actual is not None and actual != requested:
+        log.warning("  ⚠ %s 实际 opset=%d（请求 %d 降级未生效——算子不支持），"
+                    "需板端 onnxruntime 支持该 opset（实测 ort 1.23.2 支持 ≥21）",
+                    path.name, actual, requested)
+    log.info("  ✓ 导出完成: %s (%.1f MB, 请求 opset=%d, 实际 opset=%s)",
+             path.name, size_mb, requested, actual if actual else "未知")
+    return actual
+
 
 def export_vision_encoder(
     model: ACTModel,
@@ -656,7 +808,7 @@ def export_vision_encoder(
         do_constant_folding=True,
     )
     size_mb = output_path.stat().st_size / (1024 ** 2)
-    log.info("  ✓ 导出完成: %s (%.1f MB, opset=%d)", output_path.name, size_mb, opset)
+    export_vision_encoder.last_opset = _log_exported(output_path, size_mb, opset)
 
 
 def export_transformer(
@@ -706,7 +858,7 @@ def export_transformer(
         do_constant_folding=True,
     )
     size_mb = output_path.stat().st_size / (1024 ** 2)
-    log.info("  ✓ 导出完成: %s (%.1f MB, opset=%d)", output_path.name, size_mb, opset)
+    export_transformer.last_opset = _log_exported(output_path, size_mb, opset)
     return query_weight
 
 
@@ -887,7 +1039,15 @@ def save_act_config(
         "transformer_path":    "transformer.onnx",
         "query_embed_path":    "query_embed.npy",
         "norm_stats":          norm_stats,
-        "onnx_opset":          cfg.get("_opset", 14),
+        "onnx_opset":          cfg.get("_opset_actual") or cfg.get("_opset", 14),
+        "onnx_opset_requested": cfg.get("_opset_requested", cfg.get("_opset", 14)),
+        # 图像归一化常量（**必须**在送进 vision_encoder 前应用）
+        # 官方语义: lerobot 的 normalizer_processor 对 VISUAL 做 MEAN_STD，
+        # use_imagenet_stats=true 时即 ImageNet 常量；backbone 图内不含归一化，
+        # 故 ONNX 输入 = (x/255 - image_mean) / image_std，而不是裸 [0,1]。
+        "image_mean":          _first_cam_stat(norm_stats, "mean"),
+        "image_std":           _first_cam_stat(norm_stats, "std"),
+        "image_layout":        "NCHW float32，输入范围为 ImageNet 归一化后的值",
         "notes": {
             "vision_encoder": "输入 image (1,3,480,640) float32 [0,1]归一化 → 输出 (1,512,15,20)",
             "transformer":    "输入 vision_features+state+query_embed → 输出 actions (1,100,6)",
@@ -971,6 +1131,7 @@ def main() -> None:
     # ── 1. 加载配置 ──────────────────────────────────────────────────────────
     cfg = load_config(ckpt_dir)
     cfg["_opset"] = args.opset
+    cfg["_opset_requested"] = args.opset
 
     # ── 2. 构建模型并加载权重 ────────────────────────────────────────────────
     model = load_act_model(ckpt_dir, cfg)
@@ -982,6 +1143,12 @@ def main() -> None:
     # ── 4. 导出 Module 2: Transformer + Action Head ──────────────────────────
     transformer_onnx = output_dir / "transformer.onnx"
     query_weight = export_transformer(model, transformer_onnx, args.opset)
+
+    # 记录**真实** opset（torch 降级失败时"请求值"会误导板端；取两模块的较大者）
+    real_opsets = [v for v in (getattr(export_vision_encoder, "last_opset", None),
+                               getattr(export_transformer, "last_opset", None))
+                   if isinstance(v, int)]
+    cfg["_opset_actual"] = max(real_opsets) if real_opsets else None
 
     # ── 5. 保存 query_embed.npy ──────────────────────────────────────────────
     query_npy = output_dir / "query_embed.npy"
