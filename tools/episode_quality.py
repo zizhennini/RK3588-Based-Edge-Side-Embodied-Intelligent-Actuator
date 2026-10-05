@@ -25,6 +25,7 @@ DEFAULT_THRESHOLDS = {
     "max_drop_ratio": 0.01,
     "max_track_err_deg": 5.0,
     "min_duration_ratio": 0.95,
+    "max_stale_ratio": 0.01,      # 陈旧图像帧占比上限（>0.2s 的帧，见 stale_frame_stats）
 }
 
 
@@ -98,6 +99,7 @@ def check_episode(frames: Sequence[dict], target_fps: float = 30.0,
     measured_fps = len(valid) / duration if duration > 0 else 0.0
     iv = interval_stats(valid, target_fps)
     tr = tracking_summary(valid)
+    sf = stale_frame_stats(valid)
 
     metrics = {
         "frames": len(valid),
@@ -108,6 +110,9 @@ def check_episode(frames: Sequence[dict], target_fps: float = 30.0,
         "max_dt": round(iv["max_dt"], 4),
         "drop_ratio": round(iv["drop_ratio"], 4),
         "dropped": int(iv["dropped"]),
+        "stale_frames": int(sf["total"]),
+        "stale_ratio": round(sf["ratio"], 4),
+        "stale_max_age": round(sf["max_age"], 3),
         "track_worst_joint": tr["worst_joint"],
         "track_worst_mean": (round(tr["worst_mean"], 2)
                              if tr["worst_mean"] is not None else None),
@@ -131,8 +136,26 @@ def check_episode(frames: Sequence[dict], target_fps: float = 30.0,
         if requested_s and duration < requested_s * th["min_duration_ratio"]:
             reasons.append(f"时长不足: {duration:.1f}s < 请求 {requested_s}s×"
                            f"{th['min_duration_ratio']:.2f}")
+        if sf["ratio"] > th["max_stale_ratio"]:
+            reasons.append(f"陈旧图像帧过多: {int(sf['total'])} 帧（占比 {sf['ratio']:.1%} > "
+                           f"{th['max_stale_ratio']:.0%}，最大 {sf['max_age']:.2f}s）"
+                           f"—— 图像与关节状态配对不可靠")
 
     return {"ok": not reasons, "reasons": reasons, "metrics": metrics}
+
+
+def stale_frame_stats(frames: Sequence[dict]) -> Dict[str, float]:
+    """陈旧图像帧统计（采集端写入 stale_<cam> 时）→ {total, ratio, max_age}
+
+    陈旧帧 = 相机最新帧距该关节帧超过新鲜度上限（默认 0.2s），此时图像与关节状态
+    配对不可靠，采集端不落盘并标记；本函数用于事后统计与门控。
+    """
+    total = sum(1 for fr in frames if any(k.startswith("stale_") for k in fr))
+    ages = [float(v) for fr in frames for k, v in fr.items()
+            if k.startswith("stale_")]
+    return {"total": float(total),
+            "ratio": (total / len(frames)) if frames else 0.0,
+            "max_age": max(ages) if ages else 0.0}
 
 
 def check_images(image_counts: Dict[str, int], frames: int,

@@ -115,6 +115,8 @@ def main() -> int:
     ap.add_argument("--jpeg-quality", type=int, default=90)
     ap.add_argument("--no-review", action="store_true",
                     help="不生成每集审核卡片（默认 <task>/review/episode_XXXX_review.jpg）")
+    ap.add_argument("--max-frame-age", type=float, default=0.2,
+                    help="图像帧新鲜度上限（秒）；超过则该帧不落盘并记 stale_<cam>（默认 0.2）")
     args = ap.parse_args()
 
     thresholds = {
@@ -141,6 +143,7 @@ def main() -> int:
             "max_step_deg": args.max_step,
             "leader_calib": args.leader_calib,
             "follower_calib": args.follower_calib,
+            "camera_provenance": cam_set.provenance() if cam_set else None,
             "thresholds": thresholds,
             "episodes": [],
         }
@@ -169,6 +172,14 @@ def main() -> int:
             cam_set.start()
             ready = cam_set.wait_ready(timeout_s=20.0)
             cam_names = [c for c, ok in ready.items() if ok]
+            # 曝光/白平衡锁定（配置要求时）：消除"手臂/物体入画 → AE 重收敛"的帧间跳变
+            need_lock = any(
+                (cam_set._realsense_spec.get(c) or {}).get("lock_exposure")
+                or (cam_set._realsense_spec.get(c) or {}).get("lock_white_balance")
+                for c in cam_names)
+            if need_lock:
+                locked = cam_set.lock_auto_controls()
+                print(f"已锁定自动控制: {locked}" if locked else "锁定请求但无生效项")
             print(f"相机: {cam_names}（配置 {cam_cfg_path}）"
                   + ("" if len(cam_names) == len(ready) else
                      f"  ⚠ 未就绪: {[c for c, ok in ready.items() if not ok]}"))
@@ -200,15 +211,25 @@ def main() -> int:
                     sink.start()
 
                     def frame_cb(i, elapsed, frame, _sink=sink,
-                                 _cams=list(cam_names)):
-                        """每关节帧抓一次各相机最新帧（序号与关节帧一一对应）"""
+                                 _cams=list(cam_names),
+                                 _stale_thresh=args.max_frame_age):
+                        """每关节帧抓一次各相机最新帧（序号与关节帧一一对应）
+
+                        帧新鲜度护栏：该帧距现在超过 max_frame_age 时**不写入图像、也不记录
+                        ct_<cam>**，并在帧上标 stale_<cam>=1 —— 避免"陈旧图像 + 当前关节"错配对
+                        （主流做法，参考 lerobot read_latest(max_age_ms=500)）。
+                        """
                         for c in _cams:
-                            got = cam_set.latest(c)
+                            got = cam_set.latest_age(c)
                             if got is None:
                                 continue
-                            bgr, ts = got
+                            bgr, ts, age = got
+                            if age > _stale_thresh:
+                                frame[f"stale_{c}"] = round(age, 3)
+                                continue
                             _sink.push(c, bgr)
                             frame[f"ct_{c}"] = round(ts, 4)
+                            frame[f"age_{c}"] = round(age, 4)
 
                 frames = pair.run(args.episode_time, out_path=None, follow=True,
                                   log_follower=not args.no_track_check,

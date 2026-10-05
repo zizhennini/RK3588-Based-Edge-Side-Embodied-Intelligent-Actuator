@@ -1,5 +1,36 @@
 # 开发日志 (CHANGELOG)
 
+## D435i 官方/开源调研落地（2026-10-05）
+
+两路调研归档：`docs/realsense_d435i_official_survey.md`（Intel/RealSense 官方数据手册+文档+librealsense 源码取证）、
+`docs/realsense_camera_survey.md`（ALOHA/DROID/lerobot/NVIDIA SO-101 等 5 项目对比）。
+
+### 证实我们的选择是对的
+- **2 路（固定第三人称 + 腕部）、640×480@30 与 lerobot 官方 SO-101 数据集、NVIDIA SO-101 工作坊完全同构**
+  （官方数据集：`observation.images.up/side` 或 `.top/.wrist`，480×640@30，单集 8.0/13.7s）
+- `use_depth=False` 正是 **lerobot RealSense 的默认值**，且其全库**无 `rs.align`** ✓
+- 我们"每帧记录相机真实时间戳 `ct_<cam>`"**优于生态主流**：lerobot 用主机 `perf_counter`、
+  ALOHA 只用于 debug、无人处理"多相机无共同时间戳"
+- 实测内参 HFOV 55.8°/VFOV 43.3° 与官方对 640×480 的推算 **54.9°±5% 吻合**
+
+### 新增实现
+- **官方推荐采集选项**（`hardware/camera_d435i.py::apply_capture_options`，板端实测生效：
+  `ae_priority=0.0, power_line_hz=1.0, laser_power_mw=0.0`）：
+  AE Priority=0（官方：ON 会掉帧）、Power Line=50Hz（抗市郊闪烁，仅彩色传感器注册）、投影器关（省热/防 IR 渗色）
+- **曝光/白平衡锁定**（`lock_auto_controls`，可选）：自动收敛后写值锁死（写 WB 即关 AWB），
+  消除"手臂入画 → AE 重收敛"的帧间跳变；锁定值 + 选项 + 内参写入 manifest `camera_provenance`
+- **帧新鲜度护栏**：`CameraSet.latest_age()` + 采集端 `--max-frame-age 0.2`；超龄帧不落盘并记 `stale_<cam>`，
+  质量门控新增 `max_stale_ratio=1%` 判据（板端实测：front 中位 14.7ms / wrist 28.8ms，无超龄帧）
+- **时钟归一化**：CameraManager 用墙钟、USB 相机用 `perf_counter` → 统一折算到 perf_counter 域，
+  跨相机时间戳/新鲜度才可比
+- **`tools/check_camera_coverage.py`**：8 位姿边界覆盖度验收（调研确认**没有任何开源项目做过这一环**）；
+  夹爪检测阈值按板端实测标定（桌面 S≈125/V≈120 高饱和、顶部白墙 V≈196~203 低饱和是主要误检源 →
+  V≥200 & S≤35 + 剔除"大面积且贴顶边"背景），未检出时降级为人工判读并存标注图
+
+### 文档
+- `docs/deploy_guide.md` §8.2.2：官方要点落地表 + 摆放定量结论
+  （**H=0.55m、俯角 δ=80°**、作业区在近端/基座在远端；自遮挡阴影公式 Δx=h/tanδ）
+
 ## D435i 位置调整取景工具（2026-10-05）
 
 ### 新增

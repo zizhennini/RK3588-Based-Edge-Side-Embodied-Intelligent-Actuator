@@ -113,7 +113,10 @@ class CameraManager(HardwareModule):
     """
 
     def __init__(self, width: int = 640, height: int = 480, fps: int = 30,
-                 warmup_seconds: float = 3.0, use_depth: bool = True):
+                 warmup_seconds: float = 3.0, use_depth: bool = True,
+                 ae_priority: int = 0, power_line_hz: int = 1,
+                 laser_power_mw: Optional[int] = 0,
+                 lock_exposure: bool = False, lock_white_balance: bool = False):
         self.width = width
         self.height = height
         self.fps = fps
@@ -121,6 +124,16 @@ class CameraManager(HardwareModule):
         # use_depth=False 时只开彩色流：省 USB 带宽（z16 640×480@30 ≈18MB/s）、
         # 省采集线程每帧一次 float32 转换+拷贝（≈1.2MB/帧），并降低发热（发热会导致 AE 漂移）
         self.use_depth = bool(use_depth)
+        #: 官方推荐采集选项的初值（start() 时写入，见 apply_capture_options）
+        self.ae_priority = int(ae_priority)
+        self.power_line_hz = int(power_line_hz)
+        self.laser_power_mw = laser_power_mw
+        self.lock_exposure = bool(lock_exposure)
+        self.lock_white_balance = bool(lock_white_balance)
+        #: 实际生效的选项与（若锁定）锁定值，供 manifest 记录数据来源
+        self.capture_options: dict = {}
+        self.locked_controls: dict = {}
+        self._profile = None
         self._pipeline: Optional["rs.pipeline"] = None
         self._config: Optional["rs.config"] = None
         self._frame_buffer = FrameBuffer()
@@ -145,6 +158,113 @@ class CameraManager(HardwareModule):
             "hfov_deg": hfov, "vfov_deg": vfov,
         }
 
+    # ── 采集选项（官方推荐，见 docs/realsense_d435i_official_survey.md §7）────
+
+    def apply_capture_options(self, ae_priority: Optional[int] = None,
+                              power_line_hz: Optional[int] = None,
+                              laser_power_mw: Optional[int] = None) -> dict:
+        """写入官方推荐的采集选项，返回**实际生效**值（不支持的选项跳过并告警）
+
+        - `auto_exposure_priority=0`：官方源码注明 ON 会移除帧率限制 → 掉帧；
+          恒帧率对 ACT 的均匀时间轴是硬要求
+        - `power_line_frequency=1`：50Hz 市电抗闪烁（仅彩色传感器注册该选项）
+        - `laser_power=0`：RGB 阶段关投影器（省热、避免 IR 渗色；USB2 下该选项不存在）
+        """
+        applied: dict = {}
+        if rs is None or self._profile is None:
+            return applied
+        ae_priority = self.ae_priority if ae_priority is None else ae_priority
+        power_line_hz = self.power_line_hz if power_line_hz is None else power_line_hz
+        laser_power_mw = self.laser_power_mw if laser_power_mw is None else laser_power_mw
+
+        def _set(sensor, opt_name: str, value, label: str):
+            if sensor is None or value is None:
+                return
+            try:
+                opt = getattr(rs.option, opt_name)
+                if not sensor.supports(opt):
+                    logger.info("相机选项 %s 不受支持（USB2 或机型差异），跳过", opt_name)
+                    return
+                sensor.set_option(opt, float(value))
+                applied[label] = sensor.get_option(opt)
+            except Exception as e:      # noqa: BLE001
+                logger.warning("设置相机选项 %s 失败: %s", opt_name, e)
+
+        try:
+            device = self._profile.get_device()
+        except Exception as e:          # noqa: BLE001
+            logger.warning("获取相机设备失败，跳过采集选项: %s", e)
+            return applied
+
+        color_sensor = None
+        try:
+            color_sensor = device.first_color_sensor()
+        except Exception:               # noqa: BLE001
+            pass
+        _set(color_sensor, "auto_exposure_priority", ae_priority, "ae_priority")
+        _set(color_sensor, "power_line_frequency", power_line_hz, "power_line_hz")
+
+        try:
+            depth_sensor = device.first_depth_sensor()
+        except Exception:               # noqa: BLE001
+            depth_sensor = None
+        _set(depth_sensor, "laser_power", laser_power_mw, "laser_power_mw")
+
+        if applied:
+            logger.info("相机采集选项已生效: %s", applied)
+        return applied
+
+    def lock_auto_controls(self) -> dict:
+        """把收敛后的自动曝光/白平衡**锁死**并返回锁定值（写入即关闭自动）
+
+        官方语义：`WHITE_BALANCE` 写入任意值即关闭 AWB；`ENABLE_AUTO_EXPOSURE=0` 后
+        再写 `EXPOSURE`/`GAIN` 生效。锁定的目的是消除"手臂/物体入画导致 AE 重新收敛"
+        引起的帧间亮度与色温跳变（数据集一致性）。锁定值应记入 manifest。
+        """
+        locked: dict = {}
+        if rs is None or self._profile is None:
+            return locked
+        try:
+            sensor = self._profile.get_device().first_color_sensor()
+        except Exception as e:          # noqa: BLE001
+            logger.warning("锁定曝光失败（无彩色传感器）: %s", e)
+            return locked
+
+        def _get(opt_name):
+            try:
+                opt = getattr(rs.option, opt_name)
+                return sensor.get_option(opt) if sensor.supports(opt) else None
+            except Exception:           # noqa: BLE001
+                return None
+
+        def _set(opt_name, value):
+            try:
+                opt = getattr(rs.option, opt_name)
+                if sensor.supports(opt):
+                    sensor.set_option(opt, float(value))
+                    return sensor.get_option(opt)
+            except Exception as e:      # noqa: BLE001
+                logger.warning("锁定 %s 失败: %s", opt_name, e)
+            return None
+
+        if self.lock_exposure:
+            exp, gain = _get("exposure"), _get("gain")
+            _set("enable_auto_exposure", 0)
+            if exp is not None:
+                locked["exposure"] = _set("exposure", exp)
+            if gain is not None:
+                locked["gain"] = _set("gain", gain)
+            locked["auto_exposure"] = _get("enable_auto_exposure")
+        if self.lock_white_balance:
+            wb = _get("white_balance")
+            if wb is not None:
+                locked["white_balance"] = _set("white_balance", wb)
+                locked["auto_white_balance"] = _get("enable_auto_white_balance")
+        self.locked_controls = locked
+        if locked:
+            logger.info("已锁定自动控制: %s", locked)
+        return locked
+
     # ── 生命周期 ──────────────────────────────────────────
 
     def start(self) -> None:
@@ -163,6 +283,13 @@ class CameraManager(HardwareModule):
             )
 
         profile = self._pipeline.start(self._config)
+        self._profile = profile
+
+        # 官方推荐采集选项（见 docs/realsense_d435i_official_survey.md §7）：
+        #   AE Priority=0     —— 官方源码: ON 会移除帧率限制导致掉帧；OFF 才恒帧率（ACT 需均匀时间轴）
+        #   PowerLine=50Hz(1) —— 抗 50Hz 市电闪烁，仅彩色传感器注册该选项
+        #   laser=0 mW        —— RGB 阶段关投影器（省热、避免 IR 渗色；USB2 下该选项不存在）
+        self.capture_options = self.apply_capture_options()
 
         # 记录彩色流实测内参（供"相机架多高多远"计算：由 fx/fy 反推 HFOV/VFOV）
         try:

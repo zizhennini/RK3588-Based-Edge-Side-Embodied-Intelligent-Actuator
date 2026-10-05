@@ -8,7 +8,12 @@
       "height": 480,
       "fps": 30,
       "warmup_seconds": 3.0,
-      "use_depth": false
+      "use_depth": false,
+      "ae_priority": 0,
+      "power_line_hz": 1,
+      "laser_power_mw": 0,
+      "lock_exposure": false,
+      "lock_white_balance": false
     },
     {
       "name": "wrist",

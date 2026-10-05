@@ -162,6 +162,8 @@ class CameraSet:
         self.warmup_s = warmup_s
         self._cams: Dict[str, object] = {}
         self._kind: Dict[str, str] = {}
+        self._realsense_spec: Dict[str, dict] = {}
+        self._perf_offset = 0.0
 
     @classmethod
     def from_config(cls, path: Optional[str]) -> "CameraSet":
@@ -176,6 +178,38 @@ class CameraSet:
     def names(self) -> List[str]:
         return list(self._cams.keys())
 
+    def lock_auto_controls(self) -> dict:
+        """对所有 RealSense 相机执行曝光/白平衡锁定（需在预热收敛后调用）
+
+        Returns: {cam_name: {exposure, gain, white_balance, ...}}（供 manifest 记录数据来源）
+        """
+        out = {}
+        for name, cam in self._cams.items():
+            if self._kind.get(name) != "realsense":
+                continue
+            try:
+                got = cam.lock_auto_controls()
+                if got:
+                    out[name] = got
+            except Exception as e:      # noqa: BLE001
+                logger.warning("相机 %s 锁定自动控制失败: %s", name, e)
+        return out
+
+    def provenance(self) -> dict:
+        """数据来源信息（内参/选项/锁定值）——写入 manifest 便于事后追溯"""
+        info = {}
+        for name, cam in self._cams.items():
+            if self._kind.get(name) != "realsense":
+                continue
+            info[name] = {
+                "capture_options": getattr(cam, "capture_options", {}),
+                "locked_controls": getattr(cam, "locked_controls", {}),
+                "intrinsics": cam.intrinsics_summary() if hasattr(
+                    cam, "intrinsics_summary") else None,
+                "use_depth": getattr(cam, "use_depth", None),
+            }
+        return info
+
     def start(self) -> None:
         # lerobot 官方做法: OpenCV 内部线程数设为 1，避免多线程采集时 cv2 内部
         # 线程池与我们的采集/写盘线程争抢（板端 4 小核，争抢会直接掉帧）
@@ -184,6 +218,9 @@ class CameraSet:
             cv2.setNumThreads(1)
         except Exception:
             pass
+        # 时钟归一化: CameraManager 的帧时间戳是 time.time()（墙钟），USB 相机是
+        # time.perf_counter()。统一折算到 perf_counter 域，跨相机的时间戳/新鲜度才可比。
+        self._perf_offset = time.perf_counter() - time.time()
         for spec in self.specs:
             name, kind = spec["name"], spec.get("type", "realsense")
             if kind == "realsense":
@@ -192,10 +229,16 @@ class CameraSet:
                                     height=spec.get("height", 480),
                                     fps=spec.get("fps", 30),
                                     warmup_seconds=self.warmup_s,
-                                    use_depth=spec.get("use_depth", True))
+                                    use_depth=spec.get("use_depth", True),
+                                    ae_priority=spec.get("ae_priority", 0),
+                                    power_line_hz=spec.get("power_line_hz", 1),
+                                    laser_power_mw=spec.get("laser_power_mw", 0),
+                                    lock_exposure=spec.get("lock_exposure", False),
+                                    lock_white_balance=spec.get("lock_white_balance", False))
                 cam.start()
                 self._cams[name] = cam
                 self._kind[name] = "realsense"
+                self._realsense_spec[name] = spec
                 logger.info("相机 %s (RealSense) 已启动", name)
             elif kind == "usb":
                 cam = _UsbCamera(name, device=spec.get("device", 0),
@@ -236,9 +279,22 @@ class CameraSet:
                 return None
             rgb, ts = got
             view = rgb[:, :, ::-1]
-            return (view.copy() if copy else view), ts
+            # 墙钟 → perf_counter 域（与 USB 相机、遥操作主环统一）
+            return (view.copy() if copy else view), ts + self._perf_offset
         got = cam.latest(copy=copy)
         return got
+
+    def latest_age(self, name: str):
+        """→ (bgr, ts, age_s)：age 为该帧距现在的时长（秒）
+
+        **帧新鲜度护栏**（参考 lerobot `read_latest(max_age_ms=500)` 与主流做法）：
+        采集端应在 age > ~0.2s 时丢弃该帧，避免陈旧图像与当前关节状态错误配对。
+        """
+        got = self.latest(name)
+        if got is None:
+            return None
+        bgr, ts = got
+        return bgr, ts, max(0.0, time.perf_counter() - ts)
 
     def wait_ready(self, timeout_s: float = 15.0) -> Dict[str, bool]:
         """等待各相机出首帧（CameraManager 有预热期，期间无帧）
