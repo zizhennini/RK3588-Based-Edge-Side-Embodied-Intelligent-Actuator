@@ -30,36 +30,73 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tools.cam_sink import CameraSet  # noqa: E402
 
 POSES = [
-    ("1 左前角·低位", "把夹爪移到工作区左前角、贴近桌面（低位）"),
-    ("2 左前角·高位", "同左前角，抬高约 15cm（高位）"),
-    ("3 右前角·低位", "移到右前角、贴近桌面"),
-    ("4 右前角·高位", "同右前角，抬高约 15cm"),
-    ("5 左后角·低位", "移到左后角（靠近基座一侧）、贴近桌面"),
-    ("6 右后角·低位", "移到右后角、贴近桌面"),
-    ("7 最远端", "尽量伸到离相机最远处（工作区前缘外侧一点）"),
-    ("8 最近端", "尽量收回到离相机最近处（靠近基座/画面下缘）"),
+    ("1 左前角·低位", "LF-low", "把夹爪移到工作区左前角、贴近桌面（低位）"),
+    ("2 左前角·高位", "LF-high", "同左前角，抬高约 15cm（高位）"),
+    ("3 右前角·低位", "RF-low", "移到右前角、贴近桌面"),
+    ("4 右前角·高位", "RF-high", "同右前角，抬高约 15cm"),
+    ("5 左后角·低位", "LB-low", "移到左后角（靠近基座一侧）、贴近桌面"),
+    ("6 右后角·低位", "RB-low", "移到右后角、贴近桌面"),
+    ("7 最远端", "farthest", "尽量伸到离相机最远处（工作区前缘外侧一点）"),
+    ("8 最近端", "nearest", "尽量收回到离相机最近处（靠近基座/画面下缘）"),
 ]
 MIN_MARGIN_PCT = 10.0        # 夹爪到画幅四边的最小余量（%）
 
 
-def detect_gripper(bgr: np.ndarray, min_area_frac: float = 0.0015,
-                   max_area_frac: float = 0.08, vmin: int = 200, smax: int = 35,
-                   bg_area_frac: float = 0.03):
-    """检测浅色夹爪（SO101 白色打印件）→ (bbox, area_frac) 或 (None, 最大候选面积占比)
+def draw_pixel_grid(img, step: int = 40, label_every: int = 80):
+    """像素网格 + 坐标标注（便于人工读夹爪尖端坐标；与 cam_align 工具同款）"""
+    if not step:
+        return img
+    import cv2
+    h, w = img.shape[:2]
+    for x in range(0, w, step):
+        cv2.line(img, (x, 0), (x, h), (70, 70, 70), 1)
+        if x % label_every == 0:
+            for col, th in (((0, 0, 0), 3), ((0, 255, 255), 1)):
+                cv2.putText(img, str(x), (x + 2, 12), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.35, col, th, cv2.LINE_AA)
+    for y in range(0, h, step):
+        cv2.line(img, (0, y), (w, y), (70, 70, 70), 1)
+        if y % label_every == 0:
+            for col, th in (((0, 0, 0), 3), ((0, 255, 255), 1)):
+                cv2.putText(img, str(y), (2, y + 12), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.35, col, th, cv2.LINE_AA)
+    return img
 
-    阈值来自板端实测（`/tmp` 采样，见 CHANGELOG 2026-10-05）：
-      - **浅木桌面**: H≈16, S≈122~134, V≈117~129 → 高饱和，不会命中
-      - **顶部白墙**: V≈196~203 且低饱和 → 会命中，是主要误检源
-    因此除 V≥vmin & S≤smax 外，额外**剔除"面积 > bg_area_frac 且贴着顶边"的分量**（背景白墙），
-    并做面积上下限过滤；夹爪小且位于画面内（或贴其他边）仍能被检出。
-    结果只作辅助判据，工具始终保存标注图供人工复核；--no-detect 可关闭。
+
+def detect_gripper(bgr: np.ndarray, min_area_frac: float = 0.001,
+                   max_area_frac: float = 0.15, tophat_thresh: int = 25,
+                   tophat_ksize: int = 61, sat_max: int = 90,
+                   bg_area_frac: float = 0.03, max_aspect: float = 3.0,
+                   min_thickness: int = 35):
+    """自动检测夹爪（**尽力而为，不可靠时请人工标点**）→ (bbox, 最大候选面积占比)
+
+    实测结论（板端真实位姿图，见 CHANGELOG 2026-10-05）：本场景**颜色阈值不可靠**——
+      ① 桌面有亮木纹带，局部提亮后呈细长条（~200×20），会被误判为夹爪；
+      ② 夹爪白色在不同位置差异极大：受光处 V≈254/S≈40，暗部因白平衡偏蓝 V≈130/S≈133
+         ⇒ 既不能只靠"亮"，也不能只靠"低饱和"。
+    因此本函数只做"尽力检测"（top-hat 局部提亮 + 低饱和 + **剔除细长杂斑** + 面积上下限）；
+    **人工标点优先**（--manual 或自动失败时输入夹爪尖端像素坐标）。
     """
     import cv2
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, (0, 0, int(vmin)), (180, int(smax), 255))
-    k = np.ones((5, 5), np.uint8)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k, iterations=2)
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
+    v = hsv[:, :, 2]
+    sat = hsv[:, :, 1]
+
+    # ① 局部提亮
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                       (int(tophat_ksize), int(tophat_ksize)))
+    tophat = cv2.morphologyEx(v, cv2.MORPH_TOPHAT, kernel)
+
+    # ② 显著提亮 且 低饱和（白色/浅色物体）
+    mask = cv2.inRange(tophat, int(tophat_thresh), 255)
+    mask = cv2.bitwise_and(mask, cv2.inRange(sat, 0, int(sat_max)))
+
+    # ③ 清理（小核，避免把本就不大的夹爪腐蚀掉）
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,
+                            np.ones((3, 3), np.uint8), iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
+                            np.ones((7, 7), np.uint8), iterations=2)
+
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     frame_area = float(bgr.shape[0] * bgr.shape[1])
     best, best_frac, seen = None, 0.0, 0.0
@@ -70,11 +107,52 @@ def detect_gripper(bgr: np.ndarray, min_area_frac: float = 0.0015,
         x, y, w, h = cv2.boundingRect(c)
         if frac < min_area_frac or frac > max_area_frac:
             continue
-        if frac > bg_area_frac and y <= 2:     # 贴顶边的大面积 = 背景白墙
+        if frac > bg_area_frac and y <= 2:      # 贴顶边的大面积 = 背景（白墙等）
             continue
+        aspect = max(w, h) / max(1.0, float(min(w, h)))
+        if aspect > max_aspect or min(w, h) < min_thickness:
+            continue                             # 剔除细长杂斑（桌面木纹亮带 ~200×20）
         if best is None or frac > best_frac:
             best, best_frac = (x, y, w, h), frac
     return best, (best_frac if best else seen)
+
+
+def point_margins(px: float, py: float, width: int, height: int) -> dict:
+    """人工标点（夹爪尖端像素）→ 到画面四边的余量（%）
+
+    比自动检测可靠：只需一个点即可判断"是否贴边/出画"，操作者从叠加了像素网格的
+    画面里读数（网格每 40px、坐标每 80px 标注一次）。
+    """
+    px = min(max(float(px), 0.0), float(width))
+    py = min(max(float(py), 0.0), float(height))
+    return {
+        "left_pct": 100.0 * px / width,
+        "right_pct": 100.0 * (width - px) / width,
+        "top_pct": 100.0 * py / height,
+        "bottom_pct": 100.0 * (height - py) / height,
+        "center_pct": (round(100.0 * px / width, 1), round(100.0 * py / height, 1)),
+        "manual_point": [round(px, 1), round(py, 1)],
+    }
+
+
+def parse_point(raw: str):
+    """解析人工标点输入 → (x, y) 或 None（支持 "300,380" / "300 380"；空/非法返回 None）"""
+    if not raw:
+        return None
+    s = raw.replace("，", ",").replace("(", "").replace(")", "").strip()
+    for sep in (",", " ", ";", "x"):
+        if sep in s:
+            parts = [p for p in s.split(sep) if p.strip()]
+            break
+    else:
+        parts = [s]
+    try:
+        if len(parts) >= 2:
+            return float(parts[0]), float(parts[1])
+    except (ValueError, TypeError):
+        pass
+    print(f"    ⚠ 无法解析坐标 {raw!r}（应形如 \"300,380\"），本次按自动结果处理")
+    return None
 
 
 def bbox_margins(bbox, width: int, height: int) -> dict:
@@ -114,8 +192,17 @@ def main() -> int:
     ap.add_argument("--poses", type=int, default=8, help="测试位姿数（4=只测四角低位）")
     ap.add_argument("--min-margin", type=float, default=MIN_MARGIN_PCT)
     ap.add_argument("--no-detect", action="store_true", help="关闭自动检测（纯存图）")
-    ap.add_argument("--vmin", type=int, default=200, help="浅色目标 V 下限（HSV，默认 200）")
-    ap.add_argument("--smax", type=int, default=35, help="浅色目标 S 上限（HSV，默认 35）")
+    ap.add_argument("--tophat", type=int, default=25,
+                    help="局部提亮阈值（top-hat 后，默认 25；检不到就调小，误检就调大）")
+    ap.add_argument("--tophat-ksize", type=int, default=61,
+                    help="top-hat 核尺寸（默认 61，应大于夹爪尺寸）")
+    ap.add_argument("--sat-max", type=int, default=90,
+                    help="低饱和上限 S（默认 90；白色物体通常 <60）")
+    ap.add_argument("--debug-detect", action="store_true", help="打印检测中间统计")
+    ap.add_argument("--no-manual", action="store_true",
+                    help="不提示人工标点（纯自动检测，失败记未检测）")
+    ap.add_argument("--pixel-grid", type=int, default=40,
+                    help="人工标点时叠加的像素网格步长（默认 40，0=不叠）")
     args = ap.parse_args()
 
     import cv2
@@ -134,8 +221,8 @@ def main() -> int:
           + ("| 已载入工作区多边形" if poly is not None else "| 无工作区多边形（可先用 cam_align 标定）"))
 
     results = []
-    for i, (name, hint) in enumerate(poses, start=1):
-        print(f"\n--- [{i}/{len(poses)}] {name} ---")
+    for i, (name, ascii_name, hint) in enumerate(poses, start=1):
+        print(f"\n--- [{i}/{len(poses)}] {name} ({ascii_name}) ---")
         print(f"    {hint}")
         try:
             input("    摆好后按 Enter 拍照...")
@@ -154,12 +241,40 @@ def main() -> int:
         if poly is not None and len(poly) >= 3:
             cv2.polylines(vis, [poly.astype(np.int32)], True, (0, 165, 255), 2)
         bbox, frac = (None, 0.0) if args.no_detect else detect_gripper(
-            bgr, vmin=args.vmin, smax=args.smax)
+            bgr, tophat_thresh=args.tophat, tophat_ksize=args.tophat_ksize,
+            sat_max=args.sat_max)
         verdict, detail = "手工判读", {}
         if bbox is None and not args.no_detect:
-            # 自动检测无结果 → 请操作者看标注图人工确认（避免把"未检出"当成"不合格"）
-            print(f"    ⚠ 未自动检测到浅色夹爪（最大候选占比 {frac * 100:.2f}%）")
-        if bbox is not None:
+            print(f"    ⚠ 未自动检测到夹爪（最大候选占比 {frac * 100:.2f}%）")
+        elif bbox is not None:
+            print(f"    自动检测: bbox={bbox} 占比 {frac * 100:.2f}%")
+
+        # ── 人工标点优先（本场景颜色检测不可靠；叠加像素网格便于读数）──
+        manual = None
+        if not args.no_manual:
+            vis = draw_pixel_grid(vis, step=args.pixel_grid)
+            print("    图中夹爪尖端坐标（看叠加的像素网格读数）: ", end="")
+            try:
+                raw = input('形如 "300,380"，直接回车=采用自动检测结果: ').strip()
+            except (KeyboardInterrupt, EOFError):
+                raw = ""
+            manual = parse_point(raw)
+
+        if manual is not None:
+            m = point_margins(manual[0], manual[1], w, h)
+            detail = m
+            mn = min(m["left_pct"], m["right_pct"], m["top_pct"], m["bottom_pct"])
+            verdict = "合格" if mn >= args.min_margin else f"余量不足({mn:.0f}%)"
+            cx, cy = int(manual[0]), int(manual[1])
+            cv2.drawMarker(vis, (cx, cy), (0, 0, 255), cv2.MARKER_CROSS, 24, 2)
+            cv2.circle(vis, (cx, cy), 3, (0, 255, 0), -1)
+            if poly is not None:
+                inside = cv2.pointPolygonTest(poly.astype(np.int32),
+                                              (float(cx), float(cy)), False) >= 0
+                detail["inside_workspace"] = bool(inside)
+                if not inside:
+                    verdict += " 且不在工作区内"
+        elif bbox is not None:
             x, y, bw, bh = bbox
             m = bbox_margins(bbox, w, h)
             detail = m
@@ -173,7 +288,8 @@ def main() -> int:
                 detail["inside_workspace"] = bool(inside)
                 if not inside:
                     verdict += " 且不在工作区内"
-        txt = f"{name}  {verdict}  min_margin=" + (
+        # 画面文字只用 ASCII（cv2.putText 不支持中文，中文位姿名会渲染成 ???）
+        txt = f"[{i}] {ascii_name}  {verdict}  min_margin=" + (
             f"{min(detail.get('left_pct', 0), detail.get('right_pct', 0), detail.get('top_pct', 0), detail.get('bottom_pct', 0)):.0f}%"
             if detail else "n/a")
         for k, line in enumerate((txt, f"age={age * 1000:.0f}ms  blob={frac * 100:.2f}%")):
@@ -181,9 +297,10 @@ def main() -> int:
                         (0, 0, 0), 3, cv2.LINE_AA)
             cv2.putText(vis, line, (8, 22 + k * 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                         (255, 255, 255), 1, cv2.LINE_AA)
-        p = out_dir / f"pose_{i}_{name.split()[0]}.jpg"
+        p = out_dir / f"pose_{i}_{ascii_name}.jpg"
         cv2.imwrite(str(p), vis, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
-        print(f"    {verdict}  图像延迟 {age * 1000:.0f}ms  浅色目标占比 {frac * 100:.2f}%")
+        print(f"    → {verdict}  图像延迟 {age * 1000:.0f}ms" +
+              ("（人工标点）" if manual is not None else "（自动检测）"))
         if detail:
             print(f"    余量: 左{detail['left_pct']:.0f}% 右{detail['right_pct']:.0f}% "
                   f"上{detail['top_pct']:.0f}% 下{detail['bottom_pct']:.0f}%"

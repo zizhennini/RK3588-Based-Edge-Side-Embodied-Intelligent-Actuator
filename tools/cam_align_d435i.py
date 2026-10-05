@@ -401,8 +401,36 @@ def draw_overlay(bgr: np.ndarray, show: dict, poly=None, target_zone=0.6,
 
 
 def load_poly(corners_arg, cfg_path=CFG_PATH):
+    """解析工作区多边形：优先 `--corners` 字符串，否则读 config/cam_align.json
+
+    `--corners` 支持：
+      "x,y x,y x,y x,y"（推荐，空格分隔四点）｜ "x1,y1;x2,y2;x3,y3;x4,y4"
+      ｜ "x1 y1 x2 y2 x3 y3 x4 y4"（8 个数）
+    非法输入会给出**明确提示**而不是抛 ValueError 栈（占位符 "x,y" 这类最容易误粘贴）。
+    """
     if corners_arg:
-        pts = [tuple(float(v) for v in p.split(",")) for p in corners_arg.split()]
+        s = str(corners_arg).replace("；", ";").replace("，", ",").strip()
+        pts = []
+        try:
+            if ";" in s:                       # x1,y1;x2,y2;...
+                pts = [tuple(float(v) for v in p.split(",")) for p in s.split(";") if p.strip()]
+            elif "," in s:                     # "x,y x,y x,y x,y"
+                pts = [tuple(float(v) for v in p.replace(";", " ").split(","))
+                       for p in s.split()]
+            else:                              # 8 个数
+                nums = [float(v) for v in s.split()]
+                pts = list(zip(nums[0::2], nums[1::2]))
+            pts = [p for p in pts if len(p) == 2]
+        except ValueError as e:
+            raise SystemExit(
+                f"✗ --corners 解析失败: {e}\n"
+                f"  收到: {corners_arg!r}\n"
+                f'  正确格式: --corners "120,90 520,90 540,420 100,430"（四点像素坐标，顺时针）\n'
+                f"  提示: 直接把四个角的 x,y 数字填进去；不要照抄带字母的占位示例。\n"
+                f"  也可以不传 --corners：工具启动后浏览器里看图上的 40px 像素网格读坐标。")
+        if len(pts) < 3:
+            raise SystemExit(
+                f"✗ --corners 至少需要 3 个点，收到 {len(pts)} 个: {corners_arg!r}")
         return np.array(pts, dtype=np.float32)
     if cfg_path.exists():
         try:
