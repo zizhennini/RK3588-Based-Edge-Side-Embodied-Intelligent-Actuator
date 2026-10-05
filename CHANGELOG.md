@@ -1,5 +1,28 @@
 # 开发日志 (CHANGELOG)
 
+## GPU 训练环境就绪 + 默认 opset 修正（2026-10-05）
+
+### `rk3588` env 的 torch 换为 CUDA 版
+- **踩坑**：PyPI 默认 `torch 2.11.0` 现在是 **cu130**，而本机驱动 566.26 只到 **CUDA 12.7**
+  → `cuda available: False`（`The NVIDIA driver on your system is too old (found version 12070)`）
+- **解法**：从 cu128 索引安装同版本 CUDA 构建
+  `pip install --index-url https://download.pytorch.org/whl/cu128 "torch==2.11.0+cu128" "torchvision==0.26.0+cu128"`
+  （并清掉 cu13 的 nvidia-*/cuda-toolkit 残余，约 3GB）
+- **结果**：`torch 2.11.0+cu128 | cuda True | RTX 4060 Laptop (8.6GB, sm89)`；
+  `4096³ matmul 31ms`、`conv1(8×3×480×640) 18.7ms`；numpy 2.2.6 / lerobot 0.6.1 / onnx 1.23.0 均未变动
+- **GPU 训练实测**：ACT 52M，`batch=8`，**稳态 0.334 s/step**（CPU 为 1.6~1.8 s/step，约 5 倍），
+  显存 **3.73 GB**，loss 49.6 → 8.1（20 步）
+
+### 新增 `scripts/train_act.sh`
+一键封装：环境自检 → 原始 JSON 转 LeRobotDataset（已有则跳过，`FORCE=1` 重建）→
+`lerobot-train`（内置 `--policy.push_to_hub=false` 等必需开关）→ 打印 checkpoint 与导出命令。
+
+### 默认 opset 14 → 18
+torch>=2.9 的导出器对 ACT 图（含 `LayerNormalization`）**无法降到 14**，会提示
+`Please consider setting opset_version >=18` 并保留 18；请求 14 只是徒增两次降级失败告警。
+现默认 **18**（板端 ORT 1.23.2 支持 ≥21），并在 `act_config.json` 中区分实际/请求值。
+已在 cu128 torch 上复验导出：退出码 0、6 个产物齐全、vision 校验 `max_diff<1e-4`。
+
 ## M2/M3 训练与导出链路打通（2026-10-05）
 
 相机支架在打印，先做与相机无关的 M2/M3。**端到端已跑通并实测**（合成数据冒烟）。

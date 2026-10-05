@@ -7,13 +7,13 @@
 Usage:
     python tools/export_act_onnx.py \
         --checkpoint outputs/train/act_so101/checkpoints/last/pretrained_model \
-        --output_dir models/act/ \
-        --opset 14
+        --output_dir models/act/
+        # opset 默认 18（torch>=2.9 对 ACT 图无法降到 14，详见 --help）
 
 输出:
-    models/act/vision_encoder.onnx   (~100MB, ResNet18 backbone)
-    models/act/transformer.onnx      (~180MB, encoder+decoder+action_head)
-    models/act/act_config.json       (模型配置，供板端加载)
+    models/act/vision_encoder.onnx   (~45MB, ResNet18 backbone)
+    models/act/transformer.onnx      (~92MB, encoder+decoder+action_head)
+    models/act/act_config.json       (模型配置 + norm_stats + image_mean/std，供板端加载)
     models/act/query_embed.npy       (learned queries, 100×512 float32)
 
 模型结构参考:
@@ -1094,8 +1094,10 @@ def main() -> None:
         help="ONNX 输出目录（默认: models/act/）",
     )
     parser.add_argument(
-        "--opset", type=int, default=14, metavar="N",
-        help="ONNX opset 版本（默认: 14，scaled_dot_product_attention 需要 14+）",
+        "--opset", type=int, default=18, metavar="N",
+        help="ONNX opset 版本（默认: 18）。torch>=2.9 的导出器对 ACT 图只能到 opset 18"
+             "（含 LayerNormalization 等算子，无法降到 14；torch 会自行提示 \""
+             "Please consider setting opset_version >=18\"），板端 onnxruntime>=1.16 支持该版本",
     )
     parser.add_argument(
         "--no-verify", action="store_true",

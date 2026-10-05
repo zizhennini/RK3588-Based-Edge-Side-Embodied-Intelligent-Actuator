@@ -81,8 +81,13 @@ lerobot-train \
 ```bash
 python tools/export_act_onnx.py \
     --checkpoint ~/train/<task>/checkpoints/last/pretrained_model \
-    --output_dir models/act/ --opset 14
+    --output_dir models/act/
 ```
+
+> **opset 用默认的 18**：torch>=2.9 的导出器对 ACT 图（含 `LayerNormalization`）**无法降到 14**，
+> 请求 14 会打印 `Please consider setting opset_version >=18` 并保留 18。
+> 板端 onnxruntime 1.23.2 支持 ≥21，故 18 可直接用。`act_config.json` 同时记录
+> `onnx_opset`(实际) 与 `onnx_opset_requested`(请求)。
 
 产出：`vision_encoder.onnx(+.data)`、`transformer.onnx(+.data)`、`query_embed.npy`、`act_config.json`。
 
