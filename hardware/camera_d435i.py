@@ -24,18 +24,19 @@ class FrameBuffer:
         self._latest: Optional[tuple[np.ndarray, np.ndarray, float]] = None
         self._lock = threading.Lock()
 
-    def update(self, rgb: np.ndarray, depth: np.ndarray, ts: float):
-        """写入新帧（深拷贝）"""
+    def update(self, rgb: np.ndarray, depth: Optional[np.ndarray], ts: float):
+        """写入新帧（深拷贝；depth 可为 None = 未启用深度流）"""
         with self._lock:
-            self._latest = (rgb.copy(), depth.copy(), ts)
+            self._latest = (rgb.copy(),
+                            depth.copy() if depth is not None else None, ts)
 
-    def get_frame(self) -> Optional[tuple[np.ndarray, np.ndarray, float]]:
-        """获取最新帧（深拷贝，非阻塞）"""
+    def get_frame(self) -> Optional[tuple[np.ndarray, Optional[np.ndarray], float]]:
+        """获取最新帧（深拷贝，非阻塞）；未启用深度时 depth 为 None"""
         with self._lock:
             if self._latest is None:
                 return None
             rgb, depth, ts = self._latest
-            return rgb.copy(), depth.copy(), ts
+            return rgb.copy(), (depth.copy() if depth is not None else None), ts
 
     def get_rgb_ts(self) -> Optional[tuple[np.ndarray, float]]:
         """仅取 RGB + **该帧自身的时间戳**（不拷贝深度，供高频采集路径使用）
@@ -76,11 +77,14 @@ class CameraManager(HardwareModule):
     """
 
     def __init__(self, width: int = 640, height: int = 480, fps: int = 30,
-                 warmup_seconds: float = 3.0):
+                 warmup_seconds: float = 3.0, use_depth: bool = True):
         self.width = width
         self.height = height
         self.fps = fps
         self.warmup_seconds = warmup_seconds
+        # use_depth=False 时只开彩色流：省 USB 带宽（z16 640×480@30 ≈18MB/s）、
+        # 省采集线程每帧一次 float32 转换+拷贝（≈1.2MB/帧），并降低发热（发热会导致 AE 漂移）
+        self.use_depth = bool(use_depth)
         self._pipeline: Optional["rs.pipeline"] = None
         self._config: Optional["rs.config"] = None
         self._frame_buffer = FrameBuffer()
@@ -102,9 +106,10 @@ class CameraManager(HardwareModule):
         self._config.enable_stream(
             rs.stream.color, self.width, self.height, rs.format.bgr8, self.fps
         )
-        self._config.enable_stream(
-            rs.stream.depth, self.width, self.height, rs.format.z16, self.fps
-        )
+        if self.use_depth:
+            self._config.enable_stream(
+                rs.stream.depth, self.width, self.height, rs.format.z16, self.fps
+            )
 
         self._pipeline.start(self._config)
 
@@ -199,20 +204,24 @@ class CameraManager(HardwareModule):
                     continue
 
                 color_frame = frames.get_color_frame()
-                depth_frame = frames.get_depth_frame()
-
-                if not color_frame or not depth_frame:
+                if not color_frame:
+                    continue
+                depth_frame = frames.get_depth_frame() if self.use_depth else None
+                if self.use_depth and not depth_frame:
                     continue
 
                 # 转为 numpy 数组
                 color_image = np.asanyarray(color_frame.get_data())
-                depth_image = np.asanyarray(depth_frame.get_data())
 
                 # BGR -> RGB
                 rgb = color_image[:, :, ::-1].copy()
 
-                # 深度转米（D435i 深度单位是 mm）
-                depth_m = depth_image.astype(np.float32) / 1000.0
+                # 深度转米（D435i 深度单位是 mm）；未启用深度时为 None
+                if depth_frame is None:
+                    depth_m = None
+                else:
+                    depth_image = np.asanyarray(depth_frame.get_data())
+                    depth_m = depth_image.astype(np.float32) / 1000.0
 
                 ts = time.time()
                 self._frame_buffer.update(rgb, depth_m, ts)

@@ -191,7 +191,8 @@ class CameraSet:
                 cam = CameraManager(width=spec.get("width", 640),
                                     height=spec.get("height", 480),
                                     fps=spec.get("fps", 30),
-                                    warmup_seconds=self.warmup_s)
+                                    warmup_seconds=self.warmup_s,
+                                    use_depth=spec.get("use_depth", True))
                 cam.start()
                 self._cams[name] = cam
                 self._kind[name] = "realsense"
