@@ -29,6 +29,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -74,7 +75,7 @@ def coverage_metrics(poly: np.ndarray, width: int, height: int) -> dict:
     }
 
 
-def advice(m: dict, cov: dict = None) -> list:
+def advice(m: dict, cov: dict = None, web: bool = False) -> list:
     """把指标翻译成可执行建议 → [{"level","zh","en"}]
 
     zh 用于终端输出，en 用于画面叠加（cv2.putText 只支持 ASCII，中文会变 `?`）。
@@ -98,8 +99,15 @@ def advice(m: dict, cov: dict = None) -> list:
             f"! low detail ({s:.0f}): check focus/distance/light")
 
     if not cov:
-        add("info", "尚未标定工作区：按 m 用鼠标点工作区四角（或 --corners 传入）",
-            "workspace not marked: press m or pass --corners")
+        if web:
+            add("info",
+                "工作区未标定：从网页图上读四角像素坐标（已叠 40px 网格），"
+                "再用 --corners \"x,y x,y x,y x,y\" 重启本工具（会自动存 config/cam_align.json）",
+                "workspace not marked: read 4 corners from grid, "
+                "restart with --corners \"x,y x,y x,y x,y\"")
+        else:
+            add("info", "尚未标定工作区：按 m 用鼠标点工作区四角（或 --corners 传入）",
+                "workspace not marked: press m or pass --corners")
         return out
 
     c = cov["coverage_pct"]
@@ -142,15 +150,206 @@ def advice_lines(adv: list, key: str = "zh") -> list:
     return [a[key] for a in adv]
 
 
+class MjpegServer:
+    """极小 MJPEG over HTTP 服务（纯 stdlib）——不依赖 OpenCV GUI
+
+    板端 OpenCV 为 `GUI: NONE` 构建（无 GTK/Qt），`cv2.imshow` 不可用；且 SSH 会话无 DISPLAY。
+    因此实时预览改走浏览器：`http://<板端IP>:<port>/` 看流，`/snap.jpg` 取单帧。
+    只依赖 http.server + cv2.imencode，无新增依赖。
+    """
+
+    PAGE = ("<html><head><title>cam_align</title></head>"
+            "<body style='margin:0;background:#111;color:#ddd;font-family:monospace'>"
+            "<div style='padding:6px'>实时取景（MJPEG）｜单帧: <a style='color:#6cf' "
+            "href='/snap.jpg'>/snap.jpg</a>｜读数: <a style='color:#6cf' href='/state'>"
+            "/state</a></div>"
+            "<img src='/stream' style='width:100%;max-width:960px;display:block'>"
+            "</body></html>")
+
+    def __init__(self, port: int = 8080, quality: int = 80):
+        self.port = int(port)
+        self.quality = int(quality)
+        self._jpeg = None
+        self._state = {}
+        self._count = 0
+        self._lock = threading.Lock()
+        self._srv = None
+
+    def update(self, vis, state: dict = None):
+        import cv2
+        ok, buf = cv2.imencode(".jpg", vis, [int(cv2.IMWRITE_JPEG_QUALITY), self.quality])
+        if not ok:
+            return
+        with self._lock:
+            self._jpeg = buf.tobytes()
+            self._count += 1
+            if state:
+                self._state = state
+
+    def _current(self):
+        with self._lock:
+            return self._jpeg, self._count, dict(self._state)
+
+    def start(self) -> str:
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        me = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):        # 静音访问日志
+                pass
+
+            def do_GET(self):                 # noqa: N802
+                path = self.path.split("?")[0]
+                if path in ("/", "/index.html"):
+                    body = me.PAGE.encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                elif path == "/state":
+                    jpeg, cnt, state = me._current()
+                    body = json.dumps({"frames": cnt, **state},
+                                      ensure_ascii=False, indent=2).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                elif path in ("/snap.jpg", "/snapshot"):
+                    jpeg, _, _ = me._current()
+                    if not jpeg:
+                        self.send_error(503, "no frame yet")
+                        return
+                    self.send_response(200)
+                    self.send_header("Content-Type", "image/jpeg")
+                    self.send_header("Content-Length", str(len(jpeg)))
+                    self.end_headers()
+                    self.wfile.write(jpeg)
+                elif path == "/stream":
+                    self.send_response(200)
+                    self.send_header("Age", "0")
+                    self.send_header("Cache-Control", "no-cache, private")
+                    self.send_header("Pragma", "no-cache")
+                    self.send_header("Content-Type",
+                                     "multipart/x-mixed-replace; boundary=frame")
+                    self.end_headers()
+                    last = -1
+                    try:
+                        while True:
+                            jpeg, cnt, _ = me._current()
+                            if jpeg is not None and cnt != last:
+                                last = cnt
+                                self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\n"
+                                                 b"Content-Length: "
+                                                 + str(len(jpeg)).encode()
+                                                 + b"\r\n\r\n" + jpeg + b"\r\n")
+                            time.sleep(0.02)
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                else:
+                    self.send_error(404)
+
+        self._srv = ThreadingHTTPServer(("0.0.0.0", self.port), Handler)
+        threading.Thread(target=self._srv.serve_forever, daemon=True,
+                         name="mjpeg-server").start()
+        return f"http://<板端IP>:{self.port}/"
+
+    def stop(self):
+        if self._srv:
+            try:
+                self._srv.shutdown()
+            except Exception:
+                pass
+            self._srv = None
+
+
+def local_ips() -> list:
+    """本机所有 IPv4 地址（用于提示浏览器访问地址；排除 127.*）"""
+    import socket
+    import subprocess
+    ips: list = []
+
+    def _add(ip: str):
+        if ip and ip not in ips and not ip.startswith("127."):
+            ips.append(ip)
+
+    try:                                    # iproute2 最可靠（板端已装）
+        out = subprocess.run(["ip", "-4", "-o", "addr", "show"],
+                             capture_output=True, text=True, timeout=3).stdout
+        for line in out.splitlines():
+            parts = line.split()
+            for i, tok in enumerate(parts):
+                if tok == "inet" and i + 1 < len(parts):
+                    _add(parts[i + 1].split("/")[0])
+    except Exception:
+        pass
+    if not ips:                             # 回退：默认路由出口 + 主机名解析
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            _add(s.getsockname()[0])
+            s.close()
+        except Exception:
+            pass
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None,
+                                           socket.AF_INET):
+                _add(info[4][0])
+        except Exception:
+            pass
+    return ips
+
+
+def cv2_gui_ok() -> tuple:
+    """OpenCV 是否带 GUI 支持 → (ok, 原因)"""
+    import cv2
+    try:
+        info = cv2.getBuildInformation()
+        for line in info.splitlines():
+            if line.strip().startswith("GUI:"):
+                val = line.split(":", 1)[1].strip()
+                if val.upper() in ("NONE", ""):
+                    return False, "OpenCV 为 GUI: NONE 构建（无 GTK/Qt），cv2.imshow 不可用"
+                return True, f"OpenCV GUI={val}"
+    except Exception as e:      # noqa: BLE001
+        return False, f"无法判定 OpenCV GUI 支持: {e}"
+    return True, "未知（按可用处理）"
+
+
+def draw_pixel_grid(img, step: int = 40, label_every: int = 80):
+    """像素网格 + 坐标标注 —— 便于在浏览器里读工作区四角坐标（供 --corners 用）"""
+    import cv2
+    h, w = img.shape[:2]
+    for x in range(0, w, step):
+        cv2.line(img, (x, 0), (x, h), (70, 70, 70), 1)
+        if x % label_every == 0:
+            cv2.putText(img, str(x), (x + 2, 12), cv2.FONT_HERSHEY_SIMPLEX, 0.35,
+                        (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.putText(img, str(x), (x + 2, 12), cv2.FONT_HERSHEY_SIMPLEX, 0.35,
+                        (0, 255, 255), 1, cv2.LINE_AA)
+    for y in range(0, h, step):
+        cv2.line(img, (0, y), (w, y), (70, 70, 70), 1)
+        if y % label_every == 0:
+            cv2.putText(img, str(y), (2, y + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.35,
+                        (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.putText(img, str(y), (2, y + 12), cv2.FONT_HERSHEY_SIMPLEX, 0.35,
+                        (0, 255, 255), 1, cv2.LINE_AA)
+    return img
+
+
 # ---------------------------------------------------------------------------
 # 绘制
 # ---------------------------------------------------------------------------
 def draw_overlay(bgr: np.ndarray, show: dict, poly=None, target_zone=0.6,
-                 metrics=None, fps=None, adv=None, help_text=False) -> np.ndarray:
+                 metrics=None, fps=None, adv=None, help_text=False,
+                 pixel_grid: int = 0) -> np.ndarray:
     """画面叠加（**只用 ASCII**：cv2.putText 不支持中文，否则渲染成 `?`）"""
     import cv2
     img = bgr.copy()
     h, w = img.shape[:2]
+    if pixel_grid:
+        img = draw_pixel_grid(img, step=pixel_grid, label_every=pixel_grid * 2)
 
     if show.get("thirds", True):
         for i in (1, 2):
@@ -249,15 +448,43 @@ def main() -> int:
                     help="工作区进深受限尺寸（cm，默认 40；用于架设距离建议）")
     ap.add_argument("--target-coverage", type=float, default=0.55,
                     help="期望工作区占画面比例（默认 0.55；用于架设距离建议）")
+    ap.add_argument("--serve", type=int, default=0, nargs="?",
+                    help="启动 MJPEG 网页实时预览（端口，默认 8080）；"
+                         "OpenCV 无 GUI 或无 DISPLAY 时自动启用")
+    ap.add_argument("--pixel-grid", type=int, default=0,
+                    help="叠加像素网格步长（如 40）；便于从网页图读工作区四角坐标")
     args = ap.parse_args()
 
     cov_target = args.target_coverage
 
     import cv2
-    gui = (not args.headless) and bool(os.environ.get("DISPLAY"))
+    # 是否能开本地窗口：需要 (a) 有 DISPLAY (b) OpenCV 带 GUI 支持
+    gui_ok, gui_why = cv2_gui_ok()
+    have_display = bool(os.environ.get("DISPLAY"))
+    gui = (not args.headless) and have_display and gui_ok
     if not gui and not args.headless:
-        print("未检测到 DISPLAY（远程/无桌面）→ 自动转为保存标注图模式；"
-              "每 %.0fs 覆盖写 <out>/latest.jpg" % args.interval)
+        reasons = []
+        if not have_display:
+            reasons.append("本会话无 DISPLAY（SSH 会话常见；板端桌面在 :1）")
+        if not gui_ok:
+            reasons.append(gui_why)
+        print("无法开本地窗口 —— " + "；".join(reasons))
+        print("→ 改用 **网页实时预览**（MJPEG）")
+    server = None
+    if not gui or args.serve:
+        port = args.serve or 8080
+        server = MjpegServer(port=port)
+        url = server.start()
+        ips = local_ips() or ["<板端IP>"]
+        print(f"✓ 实时预览已启动：请用浏览器打开 "
+              + " 或 ".join(f"http://{ip}:{port}/" for ip in ips))
+        print(f"  单帧快照 http://{ips[0]}:{port}/snap.jpg ｜ 指标 JSON "
+              f"http://{ips[0]}:{port}/state")
+        print("  （网页是实时的，直接看着画面调相机位置；按 Ctrl-C 结束）")
+        if not args.pixel_grid:
+            args.pixel_grid = 40      # 网页模式默认叠像素网格，便于读工作区四角坐标
+            print("  已默认叠加像素网格（每 40px，标注每 80px）——"
+                  "读四角坐标后用 --corners \"x,y x,y x,y x,y\" 标定工作区")
 
     cs = CameraSet.from_config(args.cameras)
     cs.start()
@@ -345,9 +572,20 @@ def main() -> int:
             metrics = frame_metrics(bgr)
             cur_poly = np.array(clicks, dtype=np.float32) if len(clicks) == 4 else poly
             adv = advice(metrics, coverage_metrics(cur_poly, w, h)
-                         if cur_poly is not None and len(cur_poly) >= 3 else None)
+                         if cur_poly is not None and len(cur_poly) >= 3 else None,
+                         web=server is not None)
             vis = draw_overlay(bgr, show, cur_poly, args.target_zone, metrics, fps,
-                               adv, help_text)
+                               adv, help_text, pixel_grid=args.pixel_grid)
+
+            if server is not None:
+                server.update(vis, {
+                    "mode": "web", "fps": round(fps, 1),
+                    "brightness": round(metrics["brightness"], 1),
+                    "sharpness": round(metrics["sharpness"], 1),
+                    "advice_zh": advice_lines(adv, "zh"),
+                    "coverage_pct": (round(coverage_metrics(cur_poly, w, h)["coverage_pct"], 1)
+                                     if cur_poly is not None and len(cur_poly) >= 3 else None),
+                })
 
             if gui:
                 cv2.imshow("D435i align", vis)
@@ -374,7 +612,7 @@ def main() -> int:
                     show["cov"] = not show["cov"]
                 if key == ord("h"):
                     help_text = not help_text
-            elif now - last_save >= args.interval:
+            elif server is None and now - last_save >= args.interval:
                 last_save = now
                 cv2.imwrite(str(out_dir / "latest.jpg"), vis,
                             [int(cv2.IMWRITE_JPEG_QUALITY), 88])
@@ -386,10 +624,20 @@ def main() -> int:
                 for t in advice_lines(adv, "zh"):
                     print(f"      {t}")
                 print("      → 看 <out>/latest.jpg（远程: scp 回来或 rsync）")
+            elif server is not None and now - last_save >= args.interval:
+                # 网页模式下降低打印频率（画面在浏览器里看），但仍周期性输出指标
+                last_save = now
+                seq += 1
+                print(f"[{seq:03d}] fps {fps:.1f} 亮度 {metrics['brightness']:.0f} "
+                      f"清晰度 {metrics['sharpness']:.0f}")
+                for t in advice_lines(adv, "zh"):
+                    print(f"      {t}")
     except KeyboardInterrupt:
         print("\n结束")
     finally:
         cs.stop()
+        if server is not None:
+            server.stop()
         if gui:
             cv2.destroyAllWindows()
 
