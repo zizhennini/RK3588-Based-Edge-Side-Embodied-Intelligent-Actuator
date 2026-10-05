@@ -143,7 +143,7 @@ def main() -> int:
             "max_step_deg": args.max_step,
             "leader_calib": args.leader_calib,
             "follower_calib": args.follower_calib,
-            "camera_provenance": cam_set.provenance() if cam_set else None,
+            # camera_provenance 在相机启动后补写（此处 cam_set 尚未创建）
             "thresholds": thresholds,
             "episodes": [],
         }
@@ -189,6 +189,9 @@ def main() -> int:
             cam_names = []
     else:
         print("相机: 未启用（无配置或无 --no-camera 之外的配置）")
+
+    # 相机就绪后补写数据来源信息（内参 / 官方选项 / 锁定值），便于事后追溯
+    manifest["camera_provenance"] = cam_set.provenance() if cam_set else None
 
     done = fails = 0
     try:
@@ -260,11 +263,25 @@ def main() -> int:
                 else:
                     fails += 1
                     action = ask_retry(idx, quality)
+                    if action == "quit":
+                        # 即使退出也要**把这次被拒的尝试记录进 manifest**（含失败原因与指标），
+                        # 否则"全部被拒"时磁盘上没有任何记录，无法事后复盘
+                        entry = {
+                            "index": idx, "file": None, "status": "rejected",
+                            "frames": m["frames"], "duration_s": m["duration_s"],
+                            "fps": m["fps"], "images": img_counts or None,
+                            "quality": quality, "accepted_by_user": False,
+                            "note": "用户选择退出，未保存数据（仅记录本次尝试）",
+                            "recorded_at": datetime.datetime.now().isoformat(timespec="seconds"),
+                        }
+                        manifest["episodes"] = [e for e in manifest["episodes"]
+                                                if e["index"] != idx] + [entry]
+                        manifest["episodes"].sort(key=lambda e: e["index"])
+                        write_manifest(task_dir, manifest)
+                        print("会话结束（当前条未保存，但已记录到 manifest）")
+                        break
                     if action == "retry":
                         continue
-                    if action == "quit":
-                        print("会话结束（当前条未保存）")
-                        break
                     accepted_by_user = True
 
                 out = task_dir / f"episode_{idx:04d}.json"
