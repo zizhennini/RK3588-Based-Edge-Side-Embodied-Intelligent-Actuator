@@ -278,6 +278,38 @@ class TeleopPair:
             json.dump(data, f, indent=2, ensure_ascii=False)
         logger.info("录制已保存: %s (%d 帧)", p, len(frames))
 
+    def release_follower(self) -> None:
+        """松开从臂（关扭矩）：**条间用手重置场景**（摆物体/把臂搬回起始位）时用
+
+        松开后从臂可自由搬动；下一条开始前必须调用 `hold_follower()` 重新使能
+        （内部走防跳变流程，不会在使能瞬间甩动）。
+        """
+        try:
+            self.follower.bus.disable_torque()
+            print("  [从臂已松开] 可手动搬动/摆物体；下一条开始前会自动重新使能")
+            logger.info("从臂已松开（扭矩关闭）")
+        except Exception as e:      # noqa: BLE001
+            logger.warning("松开从臂失败: %s", e)
+
+    def hold_follower(self) -> None:
+        """重新使能从臂：**防跳变**（先读 Present → 写 Goal → 开扭矩）并平滑对齐到主臂姿态
+
+        松开期间从臂可能被手动搬到任意位置，因此使能后先 `_smooth_goto` 到主臂当前姿态，
+        再重置限幅基准 `_last_cmd` —— 否则第一帧会被 G3 限幅判为突跳。
+        """
+        try:
+            self.follower.bus.enable_torque()          # 防跳变：读 Present→写 Goal→开扭矩
+            joints = self._read_leader_filtered(timeout_s=2.0)
+            if joints is not None:
+                self._smooth_goto(joints)              # 平滑对齐到主臂当前姿态
+                self._last_cmd = joints.copy()
+            else:
+                self._last_cmd = None
+            print("  [从臂已使能] 已防跳变对齐到主臂姿态")
+            logger.info("从臂已重新使能（防跳变对齐完成）")
+        except Exception as e:      # noqa: BLE001
+            logger.warning("使能从臂失败: %s", e)
+
     def stop(self) -> None:
         try:
             self.leader.disconnect()

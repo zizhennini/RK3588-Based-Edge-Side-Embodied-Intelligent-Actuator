@@ -52,11 +52,23 @@ def next_index(task_dir: Path, start: int = 1) -> int:
 
 
 def write_manifest(task_dir: Path, manifest: dict) -> None:
+    """写 manifest（summary 由各 episode 实际帧重新计算：总帧数 + 逐关节行程/标定覆盖率）"""
     manifest["updated"] = datetime.datetime.now().isoformat(timespec="seconds")
-    manifest["summary"] = dataset_stats([
-        {"file": e["file"], "frames": None, "quality": e["quality"]}
-        for e in manifest["episodes"]
-    ])
+    eps = []
+    for e in manifest["episodes"]:
+        frames = None
+        fname = e.get("file")
+        if fname:
+            p = task_dir / fname
+            if p.exists():
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        frames = json.load(f).get("frames")
+                except Exception as ex:      # noqa: BLE001
+                    print(f"⚠ 汇总时读取 {fname} 失败: {ex}")
+        eps.append({"file": fname, "frames": frames,
+                    "quality": e.get("quality") or {}})
+    manifest["summary"] = dataset_stats(eps)
     tmp = task_dir / "manifest.json.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False)
@@ -205,6 +217,8 @@ def main() -> int:
                 except (KeyboardInterrupt, EOFError):
                     print("\n会话结束（未开始本条）")
                     break
+                # 上一条结束时已松开从臂（便于手动重置场景）→ 现在防跳变重新使能
+                pair.hold_follower()
 
                 img_dir = task_dir / f"episode_{idx:04d}_images"
                 sink = None
@@ -238,6 +252,9 @@ def main() -> int:
                                   log_follower=not args.no_track_check,
                                   frame_cb=frame_cb)
                 img_counts = sink.finish() if sink else {}
+                # 本条结束即松开从臂：便于手动重置场景（摆物体/把臂搬回起始位）；
+                # 下一条开始前会自动"防跳变"重新使能（见上面的 pair.hold_follower()）
+                pair.release_follower()
                 quality = check_episode(frames, target_fps=args.fps,
                                         requested_s=args.episode_time,
                                         thresholds=thresholds)

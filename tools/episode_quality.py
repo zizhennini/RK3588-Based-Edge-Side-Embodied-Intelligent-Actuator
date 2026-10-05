@@ -188,7 +188,12 @@ def dataset_stats(episodes: Sequence[dict]) -> Dict[str, object]:
     ok_eps = [e for e in episodes if e.get("quality", {}).get("ok")]
     all_frames: List[dict] = []
     for e in episodes:
-        all_frames.extend(e.get("frames") or [])
+        fr = e.get("frames")
+        if isinstance(fr, (list, tuple)):      # 兼容：frames 可能是帧列表，也可能是帧数(int)
+            all_frames.extend(fr)
+    # 帧列表不可用时，退回累加各集的 quality.metrics.frames
+    counted = sum(int((e.get("quality") or {}).get("metrics", {}).get("frames", 0))
+                  for e in episodes)
 
     per_joint = {}
     valid = [fr for fr in all_frames if frame_keys_ok(fr)]
@@ -213,7 +218,7 @@ def dataset_stats(episodes: Sequence[dict]) -> Dict[str, object]:
         "episodes": len(episodes),
         "episodes_ok": len(ok_eps),
         "episodes_fail": len(episodes) - len(ok_eps),
-        "total_frames": len(valid),
+        "total_frames": len(valid) if valid else counted,
         "total_duration_s": round(sum(dur_list), 2),
         "fps_min": round(min(fps_list), 2) if fps_list else None,
         "fps_mean": round(sum(fps_list) / len(fps_list), 2) if fps_list else None,
