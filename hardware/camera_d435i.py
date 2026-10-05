@@ -1,4 +1,5 @@
 """D435i 深度相机管理 -- 线程安全帧缓冲 + 深拷贝保护"""
+import math
 import time
 import threading
 import logging
@@ -15,6 +16,41 @@ try:
 except ImportError:
     rs = None
     logger.warning("pyrealsense2 未安装，CameraManager 将不可用")
+
+
+def video_fov_deg(width: int, height: int, fx: float, fy: float):
+    """由针孔相机内参反推视场角（度）→ (hfov, vfov)
+
+    HFOV = 2·atan(w / (2·fx))，VFOV = 2·atan(h / (2·fy))
+    用途：由视场角与安装距离估算可见范围，判断能否覆盖机械臂工作空间
+    （距离 d 处可见宽度 = 2·d·tan(HFOV/2)）。
+    """
+    hfov = 2.0 * math.degrees(math.atan(width / (2.0 * fx))) if fx else 0.0
+    vfov = 2.0 * math.degrees(math.atan(height / (2.0 * fy))) if fy else 0.0
+    return hfov, vfov
+
+
+def visible_size_m(distance_m: float, hfov_deg: float, vfov_deg: float):
+    """距离 d 处的可见范围（米）→ (width_m, height_m)"""
+    w = 2.0 * distance_m * math.tan(math.radians(hfov_deg) / 2.0)
+    h = 2.0 * distance_m * math.tan(math.radians(vfov_deg) / 2.0)
+    return w, h
+
+
+def plan_distance_m(workspace_w_m: float, workspace_h_m: float,
+                    hfov_deg: float, vfov_deg: float,
+                    target_coverage: float = 0.55):
+    """按"工作区占画面 target_coverage"反推所需安装距离（米）→ (d_from_w, d_from_h, d_used)
+
+    取两者较大值（宽/高都要装得下），并加 10% 余量。用于确定相机架多高/多远。
+    """
+    def _d(size_m, fov_deg):
+        half = math.tan(math.radians(fov_deg) / 2.0)
+        return size_m / (2.0 * half * target_coverage) if fov_deg > 0 else 0.0
+
+    d_w = _d(workspace_w_m, hfov_deg)
+    d_h = _d(workspace_h_m, vfov_deg)
+    return d_w, d_h, max(d_w, d_h) * 1.1
 
 
 class FrameBuffer:
@@ -93,6 +129,21 @@ class CameraManager(HardwareModule):
         self._warmed_up = False
         self._subscribers: list[Callable[[np.ndarray, np.ndarray, float], None]] = []
         self._subscribers_lock = threading.Lock()
+        #: 彩色流内参（rs.intrinsics；start() 后可用）——用于视场角/架设距离计算
+        self.color_intrinsics = None
+
+    def intrinsics_summary(self) -> Optional[dict]:
+        """彩色流内参摘要 → {width,height,fx,fy,ppx,ppy,hfov_deg,vfov_deg} 或 None"""
+        intr = self.color_intrinsics
+        if intr is None:
+            return None
+        hfov, vfov = video_fov_deg(intr.width, intr.height, intr.fx, intr.fy)
+        return {
+            "width": int(intr.width), "height": int(intr.height),
+            "fx": float(intr.fx), "fy": float(intr.fy),
+            "ppx": float(intr.ppx), "ppy": float(intr.ppy),
+            "hfov_deg": hfov, "vfov_deg": vfov,
+        }
 
     # ── 生命周期 ──────────────────────────────────────────
 
@@ -111,7 +162,15 @@ class CameraManager(HardwareModule):
                 rs.stream.depth, self.width, self.height, rs.format.z16, self.fps
             )
 
-        self._pipeline.start(self._config)
+        profile = self._pipeline.start(self._config)
+
+        # 记录彩色流实测内参（供"相机架多高多远"计算：由 fx/fy 反推 HFOV/VFOV）
+        try:
+            vsp = profile.get_stream(rs.stream.color).as_video_stream_profile()
+            self.color_intrinsics = vsp.get_intrinsics()
+        except Exception as e:      # noqa: BLE001
+            logger.warning("读取相机内参失败（不影响采集）: %s", e)
+            self.color_intrinsics = None
 
         self._running = True
         self._warmed_up = False

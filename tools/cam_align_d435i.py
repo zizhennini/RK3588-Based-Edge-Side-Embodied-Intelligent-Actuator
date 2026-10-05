@@ -242,8 +242,16 @@ def main() -> int:
     ap.add_argument("--interval", type=float, default=3.0, help="headless 存图间隔（秒）")
     ap.add_argument("--corners", default=None,
                     help='工作区四角像素坐标，如 "120,90 520,90 540,420 100,430"')
-    ap.add_argument("--target-zone", type=float, default=0.6, help="目标区边长占比")
+    ap.add_argument("--target-zone", type=float, default=0.6, help="目标区边长占比（画面参考框）")
+    ap.add_argument("--workspace-w", type=float, default=30.0,
+                    help="工作区宽度（cm，默认 30；用于架设距离建议）")
+    ap.add_argument("--workspace-h", type=float, default=40.0,
+                    help="工作区进深受限尺寸（cm，默认 40；用于架设距离建议）")
+    ap.add_argument("--target-coverage", type=float, default=0.55,
+                    help="期望工作区占画面比例（默认 0.55；用于架设距离建议）")
     args = ap.parse_args()
+
+    cov_target = args.target_coverage
 
     import cv2
     gui = (not args.headless) and bool(os.environ.get("DISPLAY"))
@@ -258,6 +266,35 @@ def main() -> int:
         print(f"✗ 相机 {args.camera} 未就绪（可用: {ready}）")
         cs.stop()
         return 1
+
+    # 视场角/架设距离建议（基于相机实测内参；D435i RGB 为针孔模型）
+    try:
+        from hardware.camera_d435i import plan_distance_m, visible_size_m, video_fov_deg
+        intr = None
+        cam_obj = cs._cams.get(args.camera)
+        if hasattr(cam_obj, "intrinsics_summary"):
+            intr = cam_obj.intrinsics_summary()
+        if intr:
+            print(f"\n相机内参实测: {intr['width']}x{intr['height']} "
+                  f"fx={intr['fx']:.1f} fy={intr['fy']:.1f} "
+                  f"→ HFOV {intr['hfov_deg']:.1f}°  VFOV {intr['vfov_deg']:.1f}°")
+            hf, vf = intr["hfov_deg"], intr["vfov_deg"]
+            print("可见范围估算（相机到桌面作业面的垂直距离 d）:")
+            for d in (0.3, 0.4, 0.5, 0.6, 0.8, 1.0):
+                w, h = visible_size_m(d, hf, vf)
+                print(f"   d={d:.1f}m → 可见 {w * 100:.0f}×{h * 100:.0f} cm"
+                      f"（工作区 30×40cm 占画面 {30 / (w * 100) * 100:.0f}%）")
+            dw, dh, d_use = plan_distance_m(args.workspace_w / 100.0,
+                                            args.workspace_h / 100.0, hf, vf,
+                                            cov_target)
+            print(f"→ 建议架设距离 ≈ {d_use:.2f} m"
+                  f"（按工作区 {args.workspace_w:.0f}×{args.workspace_h:.0f}cm "
+                  f"占画面 {cov_target:.0%}；宽/高约束分别在 "
+                  f"{dw:.2f}m / {dh:.2f}m，取大者再留 10% 余量）")
+            print("   注：以上为光轴垂直正对时的估算；相机倾斜时按沿光轴距离计，"
+                  "并用 m 标定工作区后的覆盖率实测值校正\n")
+    except Exception as e:
+        print(f"（内参/距离建议不可用: {e}）\n")
 
     poly = load_poly(args.corners)
     if poly is not None:
