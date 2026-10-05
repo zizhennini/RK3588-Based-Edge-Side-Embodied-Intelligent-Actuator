@@ -1,8 +1,10 @@
 # M2/M3 训练与导出链路（已验证）
 
 > 状态：**端到端已跑通并实测**（2026-10-05，合成数据冒烟）。真实数据采集完成后按本文档执行即可。
-> PC 侧环境：**WSL2 `rk3588` conda env**（Python 3.12.14 + lerobot 0.6.1 + torch 2.11.0）。
+> PC 侧环境：**WSL2 `rk3588` conda env**（Python 3.12.14 + lerobot 0.6.1 + **torch 2.11.0+cu128，GPU 可用**）。
 > 板端：onnxruntime 1.23.2（CPU）。
+> 相关：`official_alignment_audit.md`（与官方实现的对齐审计，含 action/state 语义与关节顺序的代码级证据）、
+> `next_steps_plan.md`（M1→M4 规划）。
 
 ## 0. 一句话流程
 

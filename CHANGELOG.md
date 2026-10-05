@@ -1,5 +1,25 @@
 # 开发日志 (CHANGELOG)
 
+## 与官方实现的对齐审计 + 下一步规划（2026-10-05）
+
+### 新增文档
+- **`docs/official_alignment_audit.md`**：逐条对照官方 lerobot 0.6.1 源码与主流开源项目，确认
+  自研部分"不是乱来"。要点：
+  - **数据集语义 ✅ 与官方逐行一致**：官方 `so_follower.py:180 get_observation()`→`Present_Position`
+    作 `observation.state`；`so_leader.py:146 get_action()`→主臂 `Present_Position` 作 `action`。
+    （我们最初把 J* 当 state 且无 action，训练崩 —— 已修正并被官方实现证实）
+  - **关节顺序 ✅ 逐字一致**：`shoulder_pan(1)…gripper(6)`（`so_follower.py:53-59`）
+  - **覆盖度检查**：官方/开源 = 运行时数据检查 + 快速人工目视测试，**无几何位姿扫描** ⇒
+    8 位姿验收降级为可选预检（`deploy_guide.md` §8.2.3），正式判据改为"试采 3 条 + 审核卡片"
+  - **有意偏离**：官方 state/action 用归一化电机单位（本体 DEGREES、**夹爪单独 RANGE_0_100**），
+    我们统一弧度 ⇒ 训练无影响，但**不能与官方 SO-101 数据集直接混用**
+- **`docs/next_steps_plan.md`**：M1→M4 执行计划（含三个待决策项 D1 任务定义 / D2 单集时长 /
+  D3 取景 A 维持现状 vs B 抬到 0.70m）、每阶段命令与判据、风险对策、里程碑验收清单
+
+### 文档更新
+- `docs/m2_m3_training_export_guide.md`：标注 GPU 环境（torch 2.11.0+cu128 可用）+ 关联审计文档
+- `docs/deploy_guide.md`：新增 §8.2.3 说明覆盖度验收的正确定位（可选预检 vs 正式判据）
+
 ## GPU 训练环境就绪 + 默认 opset 修正（2026-10-05）
 
 ### `rk3588` env 的 torch 换为 CUDA 版
