@@ -35,6 +35,13 @@ OUT_ROOT=${OUT_ROOT:-$HOME/train}
 FORCE=${FORCE:-0}
 
 REPO_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+
+# 自动激活 conda 环境（非交互 shell 里 python 可能不在 PATH）
+if ! command -v python >/dev/null 2>&1 && [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
+  # shellcheck disable=SC1091
+  source "$HOME/miniconda3/etc/profile.d/conda.sh" && conda activate rk3588
+  echo "（已自动激活 conda env: rk3588）"
+fi
 RAW_DIR="$RAW_ROOT/$TASK"
 DS_DIR="$DS_ROOT/$TASK"
 OUT_DIR="$OUT_ROOT/$TASK"
