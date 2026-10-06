@@ -37,6 +37,11 @@ models/ggcnn/
 models/act/
 models/speech/
 
+# 由标定现场生成的运动学 URDF（hardware/so101_kinematics.build_calibrated_urdf）
+# 不入库：必须每次由 config/calibration.json 现算，否则重新标定后残留旧限位
+# → IK 会解出实机到不了的角，舵机堵转发热。模块缺文件时会自动生成。
+models/so101_urdf/so101_calibrated.urdf
+
 # Python缓存
 __pycache__/
 *.pyc
