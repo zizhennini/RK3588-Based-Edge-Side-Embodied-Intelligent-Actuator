@@ -506,11 +506,12 @@ def detect_marker(rgb, kind: str, color=None, expect_px=None,
 
 
 def stable_marker(cam: Cam, kind: str, color=None, expect_px=None,
-                  ref_area=None, n=FRAMES_PER_POINT):
+                  ref_area=None, n=FRAMES_PER_POINT, max_jump_px: float = MAX_JUMP_PX):
     """连续取 n 帧取中位。返回 (center, spread_px, info)"""
     pts, last = [], None
     for _ in range(n):
-        c, info = detect_marker(cam.grab(), kind, color, expect_px, ref_area)
+        c, info = detect_marker(cam.grab(), kind, color, expect_px, ref_area,
+                                max_jump_px)
         if c is not None:
             pts.append(c)
             last = info
@@ -545,6 +546,50 @@ def apply_h(H, px):
     px = np.asarray(px, float).reshape(-1, 2)
     v = np.hstack([px, np.ones((px.shape[0], 1))]) @ np.asarray(H, float).T
     return v[:, :2] / v[:, 2:3]
+
+
+# ---------------------------------------------------------------------------
+# 静差补偿模型
+# ---------------------------------------------------------------------------
+def poly_terms(xy, degree: int = 2):
+    """(N,2) → (N,K) 多项式基（1, x, y, x², xy, y²）"""
+    xy = np.asarray(xy, float).reshape(-1, 2)
+    x, y = xy[:, 0], xy[:, 1]
+    cols = [np.ones_like(x)]
+    if degree >= 1:
+        cols += [x, y]
+    if degree >= 2:
+        cols += [x * x, x * y, y * y]
+    return np.stack(cols, axis=1)
+
+
+def fit_drift(cmd_xy, act_xy, degree: int = 2):
+    """拟合静差模型 d(x,y) = 实际 − 下发（用于下发前反号预补偿）
+
+    为什么这条路成立：实测「舵机实际 vs 下发」的偏差**连读 4 秒逐位不变** —— 是静差
+    而非没到位。位置环 DEFAULT_PID 为 P16/**I0**/D32，无积分项时恒定重力矩必然产生
+    恒定偏移（实测肘 +3.3~3.9°、肩 +2.7~4.6°，TCP 中位 9.3 mm）。
+    在固定 z + 固定姿态下手臂构型由 (x,y) 唯一决定，故 d 是 (x,y) 的光滑函数，
+    低阶多项式即可拟合；下发时用 cmd = target − d(target) 抵消。
+
+    Returns: (model dict, 拟合残差 mm 数组)
+    """
+    cmd = np.asarray(cmd_xy, float).reshape(-1, 2)
+    act = np.asarray(act_xy, float).reshape(-1, 2)
+    d = act - cmd
+    A = poly_terms(cmd, degree)
+    coef, *_ = np.linalg.lstsq(A, d, rcond=None)
+    res = np.linalg.norm(A @ coef - d, axis=1) * 1000.0
+    return dict(degree=int(degree), coef=np.asarray(coef).tolist()), res
+
+
+def apply_drift(model, x, y):
+    """返回该 (x,y) 处的静差估计 (dx, dy)（米）"""
+    if not model:
+        return 0.0, 0.0
+    A = poly_terms(np.array([[float(x), float(y)]]), int(model["degree"]))
+    d = (A @ np.asarray(model["coef"], float))[0]
+    return float(d[0]), float(d[1])
 
 
 # ---------------------------------------------------------------------------
@@ -1100,7 +1145,7 @@ def cmd_calibrate(kin, args) -> int:
 
         pts = snake_points(x0, x1, y0, y1, args.grid, args.z)
         print("\n>>> 扫掠 %d 个标定点" % len(pts))
-        px_list, xy_list, rows = [], [], []
+        px_list, xy_list, cmd_xy_list, rows = [], [], [], []
         ref_area = None
         for i, (x, y, z) in enumerate(pts, 1):
             ok, why, q_cmd = goto(dik, arm, (x, y, z))
@@ -1123,7 +1168,11 @@ def cmd_calibrate(kin, args) -> int:
             T_act = kin.fk(q_act)
             yaw = float(np.degrees(np.arctan2(T_act[1, 0], T_act[0, 0])))
             px_list.append(c)
-            xy_list.append([x, y])
+            # ⚠ 单应要拟合到**实际**末端位置（FK 实测），不是下发目标：
+            # 标记就装在手臂上，它在画面里的像素对应的是"手臂实际在哪"。
+            # 若拿下发目标当答案，9.3 mm 的静差会整体灌进单应里。
+            xy_list.append([float(T_act[0, 3]), float(T_act[1, 3])])
+            cmd_xy_list.append([x, y])
             fk_mm = float(np.hypot(T_act[0, 3] - x, T_act[1, 3] - y) * 1000)
             # 逐关节量化"舵机实际 vs 下发"：静态误差集中在哪个关节（重力下垂）
             dq = np.degrees(np.asarray(q_act) - np.asarray(q_cmd)) if q_cmd is not None \
@@ -1147,16 +1196,23 @@ def cmd_calibrate(kin, args) -> int:
             return 2
         H, inl, res = fit_homography(np.array(px_list), np.array(xy_list),
                                      args.ransac_mm)
+        # 静差补偿模型：d(x,y) = 实际 FK − 下发
+        drift_model, drift_res = fit_drift(cmd_xy_list, xy_list, degree=args.drift_degree)
         yaws = np.array([r["yaw_deg"] for r in good])
         print("\n=== 标定结果 ===")
         print("  有效点 %d，RANSAC 内点 %d" % (len(good), int(np.sum(inl))))
-        print("  重投影残差: 中位 %.2f mm  p90 %.2f mm  max %.2f mm"
+        print("  单应重投影残差（像素 ↔ **实际**末端，物理正确口径）: "
+              "中位 %.2f mm  p90 %.2f mm  max %.2f mm"
               % (np.median(res), np.percentile(res, 90), res.max()))
-        print("  偏航跨度 %.3f°（应很小 —— 它是「c 恒定」前提的量化指标）"
-              % (yaws.max() - yaws.min()))
-        print("  舵机到位偏差（不含相机）: 中位 %.2f mm  max %.2f mm"
+        print("  静差（下发的目标 vs 实际到达）: 中位 %.2f mm  max %.2f mm"
               % (np.median([r["fk_err_mm"] for r in good]),
                  np.max([r["fk_err_mm"] for r in good])))
+        print("  静差模型（%d 阶，d(x,y)=实际−下发）拟合后残余: 中位 %.2f mm  max %.2f mm"
+              % (args.drift_degree, np.median(drift_res), drift_res.max()))
+        print("  → 可补偿的部分 = 原静差中位 − 模型残余中位 = %.2f mm"
+              % (np.median([r["fk_err_mm"] for r in good]) - np.median(drift_res)))
+        print("  偏航跨度 %.3f°（应很小 —— 它是「c 恒定」前提的量化指标）"
+              % (yaws.max() - yaws.min()))
         print("  单应矩阵 H（像素 → 基座 XY, 米）:")
         for row in H:
             print("    [%+.6e %+.6e %+.6e]" % tuple(row))
@@ -1174,6 +1230,9 @@ def cmd_calibrate(kin, args) -> int:
                              p90=float(np.percentile(res, 90)), max=float(res.max())),
             fk_err_mm=dict(median=float(np.median([r["fk_err_mm"] for r in good])),
                            max=float(np.max([r["fk_err_mm"] for r in good]))),
+            drift_model=drift_model,
+            drift_fit_residual_mm=dict(median=float(np.median(drift_res)),
+                                       max=float(drift_res.max())),
             points=rows,
         )
         args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -1236,58 +1295,111 @@ def cmd_verify(kin, args) -> int:
             return 2
         ref_area = float(info0["area"]) if info0 and info0.get("area") else None
 
+        drift = cal.get("drift_model")
+        # 用单应的**逆变换**预测标记该出现在哪个像素：H 拟合的是
+        # 「标记像素 ↔ 实际末端 XY」，所以把下发的 XY 送进 H⁻¹ 就能预测像素位置。
+        # 这比"沿用上一帧像素"可靠得多 —— 后者在手臂大幅移动或画面里出现别的暗块时
+        # 会误锁（实测有 2/10 点锁到底座暗块，误差 140 mm 的假数据）。
+        Hinv = np.linalg.inv(np.asarray(H, float))
+
+        def px_expect(cmd_xy):
+            return apply_h(Hinv, np.asarray(cmd_xy, float).reshape(1, 2))[0]
+
+        do_raw = args.verify_mode in ("both", "raw")
+        do_cmp = args.verify_mode in ("both", "compensated")
+        print("验证模式: %s%s" % (args.verify_mode,
+                               "" if not do_cmp or not drift
+                               else "（静差模型 %d 阶）" % int(drift["degree"])))
+
         rows = []
-        for i, (x, y, zz) in enumerate(pts, 1):
-            ok, why, _ = goto(dik, arm, (x, y, zz))
+
+        def measure(x, y, zz, tag, cmd_xy):
+            """走到 cmd_xy，用相机测实际到达位置，与目标 (x,y) 比较"""
+            ok, why, _ = goto(dik, arm, (cmd_xy[0], cmd_xy[1], zz))
             if not ok:
-                print("  [%2d/%d] 跳过: %s" % (i, len(pts), why))
-                continue
+                print("  [%s] 跳过: %s" % (tag, why))
+                return None
             time.sleep(SETTLE_S)
-            c, spread, info = stable_marker(cam, mkind, mcolor, expect_px=expect,
-                                            ref_area=ref_area)
+            # 用 H⁻¹ 预测像素位置并紧门限跟踪（抗误锁）
+            pexp = px_expect(cmd_xy)
+            c, spread, info = stable_marker(cam, mkind, mcolor, expect_px=pexp,
+                                            ref_area=ref_area,
+                                            max_jump_px=args.track_gate_px)
             if c is None:
-                print("  [%2d/%d] 跳过: 看不到标记" % (i, len(pts)))
-                continue
-            expect = c
+                print("  [%s] 跳过: 看不到标记（预测像素 %s）%s"
+                      % (tag, np.round(pexp, 0).tolist(), info or ""))
+                return None
             pred = apply_h(H, c.reshape(1, 2))[0]
             dx, dy = float(pred[0] - x), float(pred[1] - y)
             err = float(np.hypot(dx, dy) * 1000)
+            # 预测像素与实测像素的偏差：若很大说明跟踪可能又认错了对象
+            px_dev = float(np.hypot(c[0] - pexp[0], c[1] - pexp[1]))
             T_act = kin.fk(arm.read_positions())
             fk_mm = float(np.hypot(T_act[0, 3] - x, T_act[1, 3] - y) * 1000)
-            rows.append(dict(i=i, cmd=[x, y, zz], px=c.tolist(),
-                             cam_xy=[float(pred[0]), float(pred[1])], err_mm=err,
-                             dx_mm=dx * 1000, dy_mm=dy * 1000, fk_err_mm=fk_mm,
-                             spread_px=spread))
-            print("  [%2d/%d] 目标(%.3f,%+.3f) 相机(%.3f,%+.3f) 偏差 %6.2f mm"
-                  "  (dx%+6.2f dy%+6.2f)  舵机 %5.2f mm"
-                  % (i, len(pts), x, y, pred[0], pred[1], err,
-                     dx * 1000, dy * 1000, fk_mm))
+            return dict(tag=tag, target=[x, y, zz], cmd=list(cmd_xy), px=c.tolist(),
+                        px_pred=pexp.tolist(), px_dev=px_dev,
+                        cam_xy=[float(pred[0]), float(pred[1])], err_mm=err,
+                        dx_mm=dx * 1000, dy_mm=dy * 1000, fk_err_mm=fk_mm,
+                        spread_px=spread)
 
-        if not rows:
-            print("✗ 没有有效验证点")
-            return 2
-        e = np.array([r["err_mm"] for r in rows])
-        f = np.array([r["fk_err_mm"] for r in rows])
-        summary = dict(n=len(rows), median_mm=float(np.median(e)),
-                       p90_mm=float(np.percentile(e, 90)), max_mm=float(e.max()),
-                       mean_dx_mm=float(np.mean([r["dx_mm"] for r in rows])),
-                       mean_dy_mm=float(np.mean([r["dy_mm"] for r in rows])),
-                       fk_median_mm=float(np.median(f)), fk_max_mm=float(f.max()))
+        for i, (x, y, zz) in enumerate(pts, 1):
+            r_raw = measure(x, y, zz, "raw", (x, y)) if do_raw else None
+            if do_cmp:
+                ddx, ddy = apply_drift(drift, x, y) if drift else (0.0, 0.0)
+                r_cmp = measure(x, y, zz, "cmp", (x - ddx, y - ddy))
+            else:
+                r_cmp = None
+            row = dict(i=i, target=[x, y, zz], raw=r_raw, comp=r_cmp)
+            rows.append(row)
+            s = "  [%2d/%d] 目标(%.3f,%+.3f)" % (i, len(pts), x, y)
+            if r_raw:
+                s += "  原始 %6.2f mm" % r_raw["err_mm"]
+            if r_cmp:
+                s += "  补偿后 %6.2f mm (补偿量 %+.1f,%+.1f mm)" % (
+                    r_cmp["err_mm"], (x - r_cmp["cmd"][0]) * 1000,
+                    (y - r_cmp["cmd"][1]) * 1000)
+            print(s)
+
+        def summ(key):
+            v = np.array([r[key]["err_mm"] for r in rows if r.get(key)])
+            f = np.array([r[key]["fk_err_mm"] for r in rows if r.get(key)])
+            if v.size == 0:
+                return None
+            return dict(n=int(v.size), median_mm=float(np.median(v)),
+                        p90_mm=float(np.percentile(v, 90)), max_mm=float(v.max()),
+                        fk_median_mm=float(np.median(f)), fk_max_mm=float(f.max()),
+                        mean_dx_mm=float(np.mean([r[key]["dx_mm"] for r in rows
+                                                  if r.get(key)])),
+                        mean_dy_mm=float(np.mean([r[key]["dy_mm"] for r in rows
+                                                  if r.get(key)])))
+
+        sr, sc = summ("raw"), summ("comp")
         print("\n=== P1 定位精度 ===")
-        print("  相机实测偏差: 中位 %.2f mm  p90 %.2f mm  max %.2f mm（%d 点）"
-              % (summary["median_mm"], summary["p90_mm"], summary["max_mm"], summary["n"]))
-        print("  系统性偏移: dx %+.2f mm  dy %+.2f mm"
-              % (summary["mean_dx_mm"], summary["mean_dy_mm"]))
-        print("  舵机到位偏差（不含相机）: 中位 %.2f mm  max %.2f mm"
-              % (summary["fk_median_mm"], summary["fk_max_mm"]))
-        c1 = summary["median_mm"] <= 5.0
-        c2 = summary["max_mm"] <= 10.0
-        print("\n  判据: ① 中位 ≤5 mm %s   ② max ≤10 mm（工程余量） %s"
+        if sr:
+            print("  ① 不补偿: 中位 %.2f mm  p90 %.2f mm  max %.2f mm（%d 点）"
+                  % (sr["median_mm"], sr["p90_mm"], sr["max_mm"], sr["n"]))
+            print("     系统性偏移 dx %+.2f mm  dy %+.2f mm | 舵机静差 中位 %.2f mm"
+                  % (sr["mean_dx_mm"], sr["mean_dy_mm"], sr["fk_median_mm"]))
+        if sc:
+            print("  ② 静差补偿后: 中位 %.2f mm  p90 %.2f mm  max %.2f mm（%d 点）"
+                  % (sc["median_mm"], sc["p90_mm"], sc["max_mm"], sc["n"]))
+            print("     系统性偏移 dx %+.2f mm  dy %+.2f mm | 残余静差 中位 %.2f mm"
+                  % (sc["mean_dx_mm"], sc["mean_dy_mm"], sc["fk_median_mm"]))
+            if sr:
+                print("  → 补偿把中位偏差从 %.2f mm 降到 %.2f mm（降低 %.0f%%）"
+                      % (sr["median_mm"], sc["median_mm"],
+                         100.0 * (1 - sc["median_mm"] / max(1e-9, sr["median_mm"]))))
+        summary = dict(raw=sr, compensated=sc, n=len(rows),
+                       verify_mode=args.verify_mode, rows=rows)
+        best = sc or sr
+        c1 = best["median_mm"] <= 5.0
+        c2 = best["max_mm"] <= 10.0
+        print("\n  判据（取较好的一种）: ① 中位 ≤5 mm %s   ② max ≤10 mm %s"
               % ("✓" if c1 else "✗", "✓" if c2 else "✗"))
         print("  结论: P1 %s" % ("通过 ✅" if (c1 and c2) else "未通过 ❌"))
         if args.json_out:
             args.json_out.write_text(json.dumps(
-                dict(summary=summary, rows=rows,
+                dict(summary=summary,
                      calib={k: v for k, v in cal.items() if k != "points"}),
                 ensure_ascii=False, indent=1), encoding="utf-8")
             print("  已写 %s" % args.json_out)
@@ -1295,8 +1407,12 @@ def cmd_verify(kin, args) -> int:
     finally:
         cam.close()
         try:
-            arm.disconnect()
-            print("从臂已断开（扭矩已释放，请扶住机械臂）")
+            if args.release:
+                arm.disconnect()
+                print("从臂已断开（扭矩已释放，请扶住机械臂）")
+            else:
+                arm.bus.disconnect(disable_torque=False)
+                print("从臂串口已关闭（**扭矩保持**；如需放开请加 --release）")
         except Exception:
             pass
 
@@ -1351,6 +1467,12 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--json-out", type=Path, default=None)
     ap.add_argument("--ransac-mm", type=float, default=5.0)
+    ap.add_argument("--drift-degree", type=int, default=2,
+                    help="静差补偿模型阶数（1=线性 2=含 x²,xy,y²；默认 2）")
+    ap.add_argument("--verify-mode", choices=["both", "raw", "compensated"], default="both",
+                    help="验证时是否启用静差补偿；both 会做 A/B 对比（默认）")
+    ap.add_argument("--track-gate-px", type=float, default=45.0,
+                    help="验证时按 H⁻¹ 预测像素后允许的偏差上限（px）")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--snap", type=Path, default=None,
                     help="--check 时把标注图存到该路径（便于人眼复核相机看到的场景）")

@@ -42,6 +42,12 @@ models/speech/
 # → IK 会解出实机到不了的角，舵机堵转发热。模块缺文件时会自动生成。
 models/so101_urdf/so101_calibrated.urdf
 
+# 手眼标定结果（tools/handeye_calib.py 产出）
+# 不入库：它绑定「相机安装位置 + 该台臂 + 当时的舵机整定 + 固定 z/姿态」整套现场条件，
+# 换相机角度或改 P/I/D 就失效。用 --calibrate 现标；文件里带标定指纹以拒绝过期使用。
+config/homography.json
+config/homography.REJECTED*.json
+
 # Python缓存
 __pycache__/
 *.pyc
