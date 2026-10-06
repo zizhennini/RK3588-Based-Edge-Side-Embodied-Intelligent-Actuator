@@ -93,7 +93,9 @@ IK_ROT_TOL = 5e-3
 IK_MAX_ITER = 300
 #: 接近阶段的容差（米）。抬高/平移只是"先挪过去"，几毫米误差无所谓；
 #: 只有最终扫掠点才需要 0.5 mm。用统一紧容差会让接近段在 2 mm 处反复擦边报失败。
-APPROACH_POS_TOL = 4e-3
+#: 实测在 x≈0.10（靠近基座、构型折叠）时抬升途经点会卡在 5 mm 左右 —— 那是数值擦边
+#: 而非真的到不了，把接近容差放宽到 8 mm 即可放行（终点仍用 IK_POS_TOL 严格判）。
+APPROACH_POS_TOL = 8e-3
 YAW_WEIGHT = 0.02            # 偏航弱约束权重（只作用于零空间）
 
 
@@ -744,6 +746,91 @@ def _marker_miss_report(rgb, kind: str, tag: str) -> None:
     for a, c, bb, fill, asp in loose[:6]:
         print("      area %5d bbox %s 填充率 %.2f 长宽比 %.2f 质心 (%.0f,%.0f)"
               % (a, bb, fill, asp, c[0], c[1]))
+
+
+def cmd_calibrate_drift(kin, args) -> int:
+    """只标定静差 d(x,y) = 实际 FK − 下发目标（**完全不用相机**）
+
+    为什么必须能单独标：抓取高度的静差与 z=0.07 显著不同（实测 12.77 vs 10.14 mm），
+    但**相机+标记在贴桌姿态下不可靠** —— 实测 z=0.02 时 RANSAC 内点只有 6/13、
+    单应重投影残差 max 137 mm（标记被自身遮挡或画面里出现更显眼的暗块，
+    抖动却只有 0.1~1.4 px，属于"稳定地跟错对象"）。
+
+    而静差是纯几何量：下发目标 → 读关节角 → 正解 → 与实际目标之差。
+    读关节角不需要相机，所以贴桌横扫也能安全、可靠地标定。
+
+    于是正确的分工是：
+      · 单应（像素 → 基座 XY）：在标记稳定可见的高度（z≈0.07）标，残差 1.23 mm
+      · 静差 d(x,y)：在**真正要用的高度**标，纯 FK
+    """
+    if not args.confirm_motion:
+        print("✗ 会驱动机器人，加 --confirm-motion")
+        return 2
+    arm, T_now = _connect(kin, args)
+    dik = make_dik(kin, _xref_from(T_now))
+    x0, x1, y0, y1 = args.region
+    z = float(args.z)
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    try:
+        print("\n>>> 分段到区域中心 (%.3f, %+.3f, z=%.3f)…" % (cx, cy, z))
+        ok, why = goto_lift(dik, arm, (cx, cy, z))
+        if not ok:
+            print("✗ 移动失败: %s" % why)
+            return 2
+        pts = snake_points(x0, x1, y0, y1, args.grid, z)
+        print(">>> 扫掠 %d 点（纯 FK 测静差，不用相机）" % len(pts))
+        cmd_xy, act_xy, rows = [], [], []
+        for i, (x, y, zz) in enumerate(pts, 1):
+            ok, why, q_cmd = goto(dik, arm, (x, y, zz))
+            if not ok:
+                print("  [%2d/%d] (%.3f,%+.3f) 跳过: %s" % (i, len(pts), x, y, why))
+                continue
+            time.sleep(args.settle)
+            q_act = arm.read_positions()
+            T_act = kin.fk(q_act)
+            d = np.array([T_act[0, 3] - x, T_act[1, 3] - y])
+            cmd_xy.append([x, y])
+            act_xy.append([T_act[0, 3], T_act[1, 3]])
+            rows.append(dict(i=i, cmd=[x, y, zz],
+                             act=[float(T_act[0, 3]), float(T_act[1, 3])],
+                             d_mm=[float(d[0] * 1000), float(d[1] * 1000)]))
+            print("  [%2d/%d] (%.3f,%+.3f) 实际 (%.4f,%+.4f) 静差 (%+.2f, %+.2f) mm"
+                  % (i, len(pts), x, y, T_act[0, 3], T_act[1, 3], d[0] * 1000, d[1] * 1000))
+        if len(cmd_xy) < 4:
+            print("✗ 有效点不足 4 个")
+            return 2
+        model, res = fit_drift(cmd_xy, act_xy, degree=args.drift_degree)
+        print("\n=== 静差标定结果（z=%.3f）===" % z)
+        print("  有效点 %d" % len(cmd_xy))
+        print("  原始静差: 中位 %.2f mm  max %.2f mm"
+              % (np.median([np.hypot(*r["d_mm"]) for r in rows]),
+                 np.max([np.hypot(*r["d_mm"]) for r in rows])))
+        print("  模型（%d 阶）拟合后残余: 中位 %.2f mm  max %.2f mm"
+              % (args.drift_degree, np.median(res), res.max()))
+        out = dict(kind="drift_model_only", created=time.strftime("%Y-%m-%d %H:%M:%S"),
+                   z_m=z, region=list(map(float, args.region)), grid=int(args.grid),
+                   drift_model=model, calib_fingerprint=kin.calib_fingerprint,
+                   n_points=len(cmd_xy),
+                   raw_drift_mm=dict(median=float(np.median([np.hypot(*r["d_mm"])
+                                                             for r in rows])),
+                                     max=float(np.max([np.hypot(*r["d_mm"])
+                                                       for r in rows]))),
+                   fit_residual_mm=dict(median=float(np.median(res)),
+                                        max=float(res.max())), points=rows)
+        args.drift_out.parent.mkdir(parents=True, exist_ok=True)
+        args.drift_out.write_text(json.dumps(out, ensure_ascii=False, indent=1),
+                                  encoding="utf-8")
+        print("  已写 %s" % args.drift_out)
+        return 0
+    finally:
+        try:
+            if args.release:
+                arm.disconnect()
+            else:
+                arm.bus.disconnect(disable_torque=False)
+            print("从臂串口已关闭（扭矩保持）")
+        except Exception:
+            pass
 
 
 def cmd_check(kin, args) -> int:
@@ -1452,6 +1539,13 @@ def main() -> int:
     ap.add_argument("--backoff", type=float, default=0.004,
                     help="检测到接触后回退的宽度（米），用于释放堵转，默认 4 mm")
     g.add_argument("--calibrate", action="store_true", help="扫掠标定（动机器人）")
+    g.add_argument("--calibrate-drift", action="store_true",
+                   help="只标定静差 d(x,y)=实际FK−下发（**不用相机**），"
+                        "用于在抓取高度单独补偿")
+    ap.add_argument("--drift-out", type=Path, default=REPO / "config" / "drift_grasp.json",
+                    help="--calibrate-drift 的输出文件")
+    ap.add_argument("--settle", type=float, default=0.45,
+                    help="静差标定时每点的稳定等待（秒）")
     g.add_argument("--verify", action="store_true", help="定位精度验证（动机器人）")
     ap.add_argument("--region", type=float, nargs=4,
                     default=[DEF_X[0], DEF_X[1], DEF_Y[0], DEF_Y[1]],
@@ -1512,6 +1606,8 @@ def main() -> int:
         return cmd_gripper(kin, args)
     if args.calibrate:
         return cmd_calibrate(kin, args)
+    if args.calibrate_drift:
+        return cmd_calibrate_drift(kin, args)
     return cmd_verify(kin, args)
 
 

@@ -330,9 +330,34 @@ def cmd_scene(kin, args) -> int:
         cam.close()
 
 
+def _drift_override(cal: dict, args, kin) -> dict:
+    """若给了抓取高度的静差文件，就用它替换标定里的静差模型（单应不动）"""
+    if args.drift_file and args.drift_file.exists():
+        d = json.loads(args.drift_file.read_text(encoding="utf-8"))
+        if d.get("calib_fingerprint") != kin.calib_fingerprint:
+            print("⚠ 静差文件标定指纹不符，忽略 %s" % args.drift_file)
+        else:
+            cal["drift_model"] = d["drift_model"]
+            cal["drift_from"] = str(args.drift_file)
+            cal["drift_z_m"] = d.get("z_m")
+            print("静差模型取自 %s（z=%.3f；单应仍用 z=%.3f 的）"
+                  % (args.drift_file, d.get("z_m", float("nan")), cal.get("z_m", 0.0)))
+    return cal
+
+
 def _setup(kin, args):
-    """连从臂 + 开相机 + 建 DownIK（calibrate/approach/single/trials 共用）"""
-    cal = load_calib(args.homography, kin)
+    """连从臂 + 开相机 + 建 DownIK（approach/single/trials 共用）
+
+    **单应与静差分开取**（关键）：
+      · 单应（像素→基座 XY）用 `--homography`，它是在标记稳定可见的高度（z≈0.07）标的
+      · 静差 d(x,y) 优先用 `--drift-file`（抓取高度上纯 FK 标的）。
+        实测抓取高度 z=0.02 的静差中位 13.27 mm，比 z=0.07 的 10.14 mm 大 3 mm，
+        且 x=0.25 处 dx≈-13~-15 mm（手臂伸出下垂）→ 用错高度的模型会差出十几毫米，
+        正好把 2 cm 方块的抓取余量吃掉（实测抓空，负载 0.0%）。
+    """
+    cal = _drift_override(load_calib(args.homography, kin), args, kin)
+    if args.drift_file and args.drift_file.exists():
+        pass
     from tools.handeye_calib import _connect
     arm, T_now = _connect(kin, Args(args.port, args.calib, args.i_term, args.release))
     dik = make_dik(kin, _xref_from(T_now))
@@ -441,9 +466,7 @@ def cmd_approach(kin, args) -> int:
     if not args.confirm_motion:
         print("✗ 会驱动机器人，加 --confirm-motion")
         return 2
-    cal = load_calib(args.homography, kin)
-    H = np.asarray(cal["H"], float)
-    drift = cal.get("drift_model")
+    cal = _drift_override(load_calib(args.homography, kin), args, kin)
     z_plane = float(cal["z_m"])
     x_ref = np.asarray(cal["x_ref"], float)
 
@@ -452,6 +475,8 @@ def cmd_approach(kin, args) -> int:
     dik = make_dik(kin, _xref_from(T_now))
     cam = Cam()
     try:
+        H = np.asarray(cal["H"], float)
+        drift = cal.get("drift_model")
         rgb, cands = detect_cubes(cam, args.colors)
         if not cands:
             print("✗ 画面里没有方块")
@@ -530,6 +555,9 @@ def main() -> int:
     g.add_argument("--single", action="store_true", help="单次抓放")
     g.add_argument("--trials", type=int, default=0, help="正式协议：N 试次")
     ap.add_argument("--homography", type=Path, default=HOMOGRAPHY)
+    ap.add_argument("--drift-file", type=Path, default=REPO / "config" / "drift_grasp.json",
+                    help="抓取高度的静差模型（由 handeye_calib --calibrate-drift 生成）；"
+                         "不存在则退回用标定里的静差模型")
     ap.add_argument("--calib", type=Path, default=REPO / "config" / "calibration.json")
     ap.add_argument("--port", default="/dev/ttyACM0")
     ap.add_argument("--i-term", type=int, default=None)
