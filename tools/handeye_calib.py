@@ -91,6 +91,9 @@ FRAMES_PER_POINT = 5         # 每点取帧数（取中位抑制抖动）
 IK_POS_TOL = 5e-4
 IK_ROT_TOL = 5e-3
 IK_MAX_ITER = 300
+#: 接近阶段的容差（米）。抬高/平移只是"先挪过去"，几毫米误差无所谓；
+#: 只有最终扫掠点才需要 0.5 mm。用统一紧容差会让接近段在 2 mm 处反复擦边报失败。
+APPROACH_POS_TOL = 4e-3
 YAW_WEIGHT = 0.02            # 偏航弱约束权重（只作用于零空间）
 
 
@@ -115,19 +118,38 @@ class DownIK:
         self.solver.dt = 0.01
         self.solver.enable_joint_limits(True)
         self.pos = self.solver.add_position_task("gripper_frame_link", np.zeros(3))
-        # 工具 z 轴对齐世界 -z（夹爪朝下）
-        self.az = self.solver.add_axisalign_task(
-            "gripper_frame_link", np.array([0.0, 0.0, 1.0]), np.array([0.0, 0.0, -1.0]))
-        # 偏航弱约束：把工具 x 轴拉向水平参考方向。注意 API 是
-        # configure(name, priority[, weight])；PositionTask 的接口是 target_world（没有 target）。
+        self._x_ref = None if x_ref is None else np.asarray(x_ref, float)
+        self._yaw_weight = float(yaw_weight)
+        self.az = None
         self.ax = None
-        if x_ref is not None and yaw_weight > 0:
-            self.ax = self.solver.add_axisalign_task(
-                "gripper_frame_link", np.array([1.0, 0.0, 0.0]), np.asarray(x_ref, float))
-            try:
-                self.ax.configure("yaw_reg", "soft", float(yaw_weight))
-            except Exception as e:      # pragma: no cover
-                print("⚠ 偏航弱约束权重设置失败(%s)，偏航可能漂移" % e)
+        self.set_axis(True)
+
+    def set_axis(self, on: bool) -> None:
+        """开关姿态约束（工具 z 轴朝下 + 偏航弱约束）
+
+        为什么要能关：断电释放扭矩后机械臂折叠下坠，工具 z 轴可能偏离竖直 45°。
+        此时若带姿态约束往上抬，QP 要在同一小步里同时完成大角度旋转与平移 → 卡局部极小。
+        正确顺序是**先在无姿态约束下抬高（平移而已，容易），再在高处原地转正**
+        （高处位置漂移无害，低处漂移会撞桌子）。
+        """
+        if on and self.az is None:
+            self.az = self.solver.add_axisalign_task(
+                "gripper_frame_link", np.array([0.0, 0.0, 1.0]), np.array([0.0, 0.0, -1.0]))
+            if self._x_ref is not None and self._yaw_weight > 0:
+                self.ax = self.solver.add_axisalign_task(
+                    "gripper_frame_link", np.array([1.0, 0.0, 0.0]), self._x_ref)
+                try:
+                    self.ax.configure("yaw_reg", "soft", self._yaw_weight)
+                except Exception as e:      # pragma: no cover
+                    print("⚠ 偏航弱约束权重设置失败(%s)，偏航可能漂移" % e)
+        elif not on and self.az is not None:
+            for t in (self.az, self.ax):
+                if t is not None:
+                    try:
+                        self.solver.remove_task(t)
+                    except Exception:
+                        pass
+            self.az = self.ax = None
 
     def ik(self, xyz, q_seed, max_iter: int = IK_MAX_ITER,
            pos_tol: float = IK_POS_TOL, rot_tol: float = IK_ROT_TOL):
@@ -145,17 +167,51 @@ class DownIK:
             T = kin.robot.get_T_world_frame("gripper_frame_link")
             ep = float(np.linalg.norm(T[:3, 3] - xyz))
             er = float(np.arccos(np.clip(np.dot(T[:3, 2], [0.0, 0.0, -1.0]), -1.0, 1.0)))
-            if ep < pos_tol and er < rot_tol:
+            if ep < pos_tol and (self.az is None or er < rot_tol):
                 break
         T = kin.robot.get_T_world_frame("gripper_frame_link")
         q = kin.joint_angles()
         yaw = float(np.degrees(np.arctan2(T[1, 0], T[0, 0])))
         inl, _ = kin.limit_violation(q)
-        conv = (ep < pos_tol and er < rot_tol)
+        # 姿态约束关闭时（可用于"无姿态要求地抬高"）只判位置
+        conv = (ep < pos_tol) and (self.az is None or er < rot_tol)
         return q, ep, er, yaw, inl, it, conv
 
+    def align(self, q_seed, max_iter: int = 400, pos_tol: float = 2e-3,
+              rot_tol: float = IK_ROT_TOL, collect: bool = False):
+        """**原地**把工具 z 轴转到朝下（位置任务改为保持当前点）
 
-def ik_path(dik: DownIK, q_start, xyz_goal, steps: int = STEPS_PER_MOVE):
+        为什么必须单独有这一步：释放扭矩/断电后机械臂会折叠下坠，工具 z 轴可能偏离
+        竖直 45°。此时若直接发"抬升 + 朝下"的合成目标，局部 QP 要在同一小步里同时完成
+        大角度旋转和平移 → 实测第 1 步（仅 6.3 mm）就偏出 29.6 mm 的局部极小。
+        先把姿态转正（位置锁住不动），再平移，问题就变成两个各自动作很小的子问题。
+
+        Returns: (q_end, traj, ep, er, iters, converged)；traj 仅在 collect=True 时收集
+        """
+        kin = self.kin
+        kin._set_joints(q_seed)
+        kin.robot.update_kinematics()
+        p_hold = kin.robot.get_T_world_frame("gripper_frame_link")[:3, 3].copy()
+        self.pos.target_world = p_hold
+        traj = []
+        ep = er = float("inf")
+        it = 0
+        for it in range(1, max_iter + 1):
+            self.solver.solve(True)
+            kin.robot.update_kinematics()
+            T = kin.robot.get_T_world_frame("gripper_frame_link")
+            ep = float(np.linalg.norm(T[:3, 3] - p_hold))
+            er = float(np.arccos(np.clip(np.dot(T[:3, 2], [0.0, 0.0, -1.0]), -1.0, 1.0)))
+            if collect:
+                traj.append(kin.joint_angles())
+            if ep < pos_tol and er < rot_tol:
+                break
+        return kin.joint_angles(), traj, ep, er, it, (ep < pos_tol and er < rot_tol)
+
+
+def ik_path(dik: DownIK, q_start, xyz_goal, steps: int = STEPS_PER_MOVE,
+            max_iter: int = IK_MAX_ITER, pos_tol: float = IK_POS_TOL,
+            rot_tol: float = IK_ROT_TOL):
     """沿笛卡尔直线渐近到 xyz_goal。
 
     为什么必须渐近不能一步到位：placo 的 QP 是**局部**求解器。实测从一个有效构型
@@ -173,26 +229,149 @@ def ik_path(dik: DownIK, q_start, xyz_goal, steps: int = STEPS_PER_MOVE):
     for i in range(1, steps + 1):
         t = i / steps
         p = p0 + (p1 - p0) * t
-        q, ep, er, yaw, inl, it, conv = dik.ik(p, q)
+        q, ep, er, yaw, inl, it, conv = dik.ik(p, q, max_iter=max_iter,
+                                               pos_tol=pos_tol, rot_tol=rot_tol)
         results.append((t, (q, ep, er, yaw, inl, it, conv)))
         if not conv:
-            # 两个误差都要报：只印位置误差会把"姿态没收敛"伪装成"位置没收敛"（踩过）
-            return False, ("IK 未收敛 @步%d/%d (位置 %.2e m/容差 %.0e，"
-                           "轴 %.2e rad/容差 %.0e)"
-                           % (i, steps, ep, IK_POS_TOL, er, IK_ROT_TOL)), q, results
+            # 只报告**当前生效**的约束。姿态约束关掉时还去报"轴误差超容差"会误导：
+            # 曾把"位置差 2.2 mm"显示成"轴 1.50 rad 超差"，看着像姿态崩了。
+            why = "位置 %.2e m/容差 %.0e" % (ep, pos_tol)
+            if dik.az is not None:
+                why += "，轴 %.2e rad/容差 %.0e" % (er, rot_tol)
+            return False, "IK 未收敛 @步%d/%d (%s)" % (i, steps, why), q, results
         if not inl:
             return False, "IK 解越限 @步%d/%d" % (i, steps), q, results
     return True, "ok", q, results
 
 
 def goto(dik: DownIK, arm, xyz_goal):
-    """规划并实际写出舵机目标。任一步失败则**不写**舵机（避免半途卡住）"""
+    """规划并实际写出舵机目标。
+
+    Returns: (ok, reason, q_cmd) —— q_cmd 为最后下发的关节角（用于量化舵机静态误差）
+    """
     ok, why, q_end, results = ik_path(dik, arm.read_positions(), xyz_goal)
     if not ok:
-        return False, why
+        return False, why, None
     for _, r in results:
         arm.write_positions(r[0])
         time.sleep(STEP_DELAY_S)
+    return True, "ok", q_end
+
+
+#: 抬升途经高度（米）。低于桌面上的方块高度就谈不上"抬起"
+Z_SAFE = 0.095
+
+
+def lift_waypoints(p_from, xyz_goal, z_safe: float = Z_SAFE):
+    """生成「先竖直抬起 → 水平平移 → 再下到目标」的途经点
+
+    为什么不能只走直线：断电释放扭矩后机械臂会**折叠下坠**到贴近桌面的低姿态，
+    从那里直线奔向区域中心会贴桌面横扫，而且对局部 IK 而言一步跨太大极易卡在
+    局部极小 —— 实测从折叠姿态直线去中心，第 1 步（才 8.4 mm）就偏了 20.8 mm。
+    分段抬升把"大范围重新构型"拆成小步，实测可通过。
+    """
+    p_from = np.asarray(p_from, float)
+    xyz_goal = np.asarray(xyz_goal, float)
+    z_up = max(float(p_from[2]), float(z_safe))
+    wps = []
+    if z_up > p_from[2] + 1e-4:
+        wps.append((float(p_from[0]), float(p_from[1]), z_up))
+    wps.append((float(xyz_goal[0]), float(xyz_goal[1]), z_up))
+    if abs(z_up - float(xyz_goal[2])) > 1e-4:
+        wps.append((float(xyz_goal[0]), float(xyz_goal[1]), float(xyz_goal[2])))
+    return wps
+
+
+def sim_lift(dik: DownIK, q_start, xyz_goal, z_safe: float = Z_SAFE):
+    """纯运动学模拟「无姿态约束抬升 → 高处转正 → 平移 → 下降」（不写舵机）
+
+    顺序很关键：
+      1. 先在**关掉姿态约束**的情况下把 TCP 竖直抬到 z_safe。纯平移，最容易，且
+         此时不需要同时旋转（低处旋转会造成位置漂移 → 可能撞桌面）。
+      2. 在高处**原地转正**（把工具 z 轴拉到竖直）。位置漂移在高处无害。
+      3. 带姿态约束平移与下降。
+    实测教训：直接在低位带姿态约束抬升，第 1 步（仅 6.3 mm）就偏出 29.6 mm 卡死；
+    而在低位原地转正虽能把 45.7° 转到 0.16°，但 TCP 漂了 28.3 mm。
+    """
+    q = np.asarray(q_start, float).copy()
+    info = dict(waypoints=0, lifted_first=False, aligned=False)
+    q0_axis = float(np.degrees(np.arccos(np.clip(
+        np.dot(dik.kin.fk(q)[:3, 2], [0.0, 0.0, -1.0]), -1.0, 1.0))))
+    info["start_axis_err_deg"] = q0_axis
+    p_cur = dik.kin.fk(q)[:3, 3].copy()
+    z_up = max(float(p_cur[2]), float(z_safe))
+
+    if q0_axis > 1.0:
+        # 1) 无姿态约束抬升（接近段容差：几毫米无所谓）
+        if z_up > p_cur[2] + 1e-4:
+            dik.set_axis(False)
+            ok, why, q, _ = ik_path(dik, q, (p_cur[0], p_cur[1], z_up),
+                                    pos_tol=APPROACH_POS_TOL)
+            dik.set_axis(True)
+            if not ok:
+                return False, "无姿态约束抬升失败: %s" % why, q, info
+            info["lifted_first"] = True
+        # 2) 高处原地转正
+        q, _, ep, er, it, conv = dik.align(q, pos_tol=0.02)
+        info["aligned"] = bool(conv)
+        info["align_iters"] = it
+        info["align_pos_drift_m"] = ep
+        info["align_axis_err_deg"] = float(np.degrees(er))
+        if not conv:
+            return False, ("高处转正失败（位置漂移 %.3f m / 轴 %.2f°）"
+                           % (ep, np.degrees(er))), q, info
+
+    # 3) 带姿态约束平移 → 下降（中间途经点用接近容差，最后一点用紧容差）
+    wps = lift_waypoints(dik.kin.fk(q)[:3, 3], xyz_goal, z_up)
+    for k, wp in enumerate(wps):
+        tol = IK_POS_TOL if k == len(wps) - 1 else APPROACH_POS_TOL
+        ok, why, q, _ = ik_path(dik, q, wp, pos_tol=tol)
+        if not ok:
+            return False, "途经点 %s: %s" % (np.round(wp, 3).tolist(), why), q, info
+        info["waypoints"] += 1
+    return True, "ok", q, info
+
+
+def goto_lift(dik: DownIK, arm, xyz_goal, z_safe: float = Z_SAFE):
+    """分段安全移动（无姿态约束抬升 → 高处转正 → 平移 → 下降），实际写舵机"""
+    q = arm.read_positions()
+    q0_axis = float(np.degrees(np.arccos(np.clip(
+        np.dot(dik.kin.fk(q)[:3, 2], [0.0, 0.0, -1.0]), -1.0, 1.0))))
+    p_cur = dik.kin.fk(q)[:3, 3].copy()
+    z_up = max(float(p_cur[2]), float(z_safe))
+
+    if q0_axis > 1.0:
+        print("  工具 z 轴偏离竖直 %.1f° → 先在无姿态约束下抬到 z=%.3f" % (q0_axis, z_up))
+        if z_up > p_cur[2] + 1e-4:
+            dik.set_axis(False)
+            ok, why, _, res = ik_path(dik, q, (p_cur[0], p_cur[1], z_up),
+                                      pos_tol=APPROACH_POS_TOL)
+            dik.set_axis(True)
+            if not ok:
+                return False, "无姿态约束抬升失败: %s" % why
+            for _, r in res:          # 逐步写出抬升轨迹（用上面这一次规划的结果）
+                arm.write_positions(r[0])
+                time.sleep(STEP_DELAY_S)
+        print("  在高处原地转正…")
+        _, traj, ep, er, it, conv = dik.align(arm.read_positions(), pos_tol=0.02,
+                                              collect=True)
+        if not conv:
+            return False, ("高处转正失败（漂移 %.3f m / 轴 %.2f°）" % (ep, np.degrees(er)))
+        print("  转正完成（%d 次迭代，漂移 %.3f m，轴残差 %.3f°）"
+              % (it, ep, np.degrees(er)))
+        for qq in traj:
+            arm.write_positions(qq)
+            time.sleep(STEP_DELAY_S)
+
+    wps = lift_waypoints(dik.kin.fk(arm.read_positions())[:3, 3], xyz_goal, z_up)
+    for k, wp in enumerate(wps):
+        tol = IK_POS_TOL if k == len(wps) - 1 else APPROACH_POS_TOL
+        ok, why, _, res = ik_path(dik, arm.read_positions(), wp, pos_tol=tol)
+        if not ok:
+            return False, "途经点 %s: %s" % (np.round(wp, 3).tolist(), why)
+        for _, r in res:
+            arm.write_positions(r[0])
+            time.sleep(STEP_DELAY_S)
     return True, "ok"
 
 
@@ -232,19 +411,24 @@ class Cam:
             pass
 
 
-def detect_dark_panel(rgb, v_max: int = 80, min_area: int = 180, max_area: int = 3000,
-                      min_fill: float = 0.62, aspect=(1.15, 3.4), y_min: int = 250):
-    """找夹爪上的**黑色矩形面板**（比"夹在夹爪里的方块"更好的标记）
+def detect_dark_panel(rgb, v_max: int = 70, min_area: int = 400, max_area: int = 8000,
+                      min_fill: float = 0.40, aspect=(1.0, 2.4), y_min: int = 0):
+    """找夹爪上**高对比的暗色刚性部件**（作为随动标记）
 
-    为什么换掉方块标记：相机是从前上方俯视，**夹爪本体把夹在下面的方块完全挡住了**
-    （实测：夹住红方块后画面里只剩桌上 5 个候选，红方块一个像素都看不到）。
-    而夹爪上本来就有一块明显的黑色矩形面板，实测在 V<60/80/100 三个阈值下都稳定给出
-    bbox≈(251,315,42,19)、**填充率 0.78~0.84**（实心矩形）；画面里其它暗分量填充率只有
-    0.18~0.45（线材、底座、云台），因此"高填充率 + 矩形"就能唯一锁定它。
+    迭代过程（三次都踩了坑，最终用"暗色实心块 + 跟踪"）：
+      1. 夹在夹爪里的彩色方块 —— **被夹爪本体完全挡住**，一个像素都看不到 ✗
+      2. 搁在桌面姿态下的黑色矩形面板 —— bbox≈(251,315,42,19) 填充率 0.80，很干净；
+         但**手臂抬到标定位姿并转为竖直朝下后，它转到背面看不见了** ✗
+      3. 抬起来之后可见的是**黑色腕部舵机圆柱**：V<60 时 bbox≈(269,183,67,55)、
+         面积 1921、填充率 0.52，是画面里**最大且对比最强**的暗分量；其它暗分量是
+         线材（填充率 0.22）和底座（在画面最下方，离得远）✓
 
-    刚性说明：该面板位于 wrist_flex 之后的连杆上（手腕/夹爪段）。而本工具**已经用弱约束
-    把偏航钉死**（实测跨度 0.14°），偏航对应的正是 wrist_roll 的转角，所以 wrist_flex 之后
-    的任何特征相对 TCP 都是刚性的 —— 不需要它是 gripper_link 上的东西。
+    刚性依据：该舵机在 wrist_flex 之后的连杆上，而本工具用弱约束把偏航钉死
+    （跨度 0.14°），偏航对应的正是 wrist_roll 转角 → wrist_flex 之后的任何特征
+    相对 TCP 都是刚性的。
+
+    ⚠ 不要写死 y_min：我最初按"手臂搁桌上"的姿态调了 y_min=250，结果手臂抬起来后
+    整个手臂都在 y<250 区域，标记被自己排除掉（排查了好一会儿）。
 
     Returns: [(area, (cx,cy), (x,y,w,h), fill, aspect)] 按面积降序
     """
@@ -272,18 +456,40 @@ def detect_dark_panel(rgb, v_max: int = 80, min_area: int = 180, max_area: int =
     return out
 
 
-def detect_marker(rgb, kind: str, color=None, expect_px=None):
+#: 跟踪时允许的逐点像素跳变上限。标记在相邻扫掠点之间通常只移动几厘米，但**首次**从
+#: 中心点跳到网格第一个角点可以超过 100 px —— 最初设 90 px 导致开头连续 5 个点报
+#: "看不到标记"（其实标记在画面里，只是被判成"跳太远"）。故放宽到 250 px，
+#: 真正的歧义（画面下方那个底座暗块）靠下面的**面积相似性**约束排除。
+MAX_JUMP_PX = 250.0
+#: 跟踪时要求候选面积与首次检测到的参考面积相近（0.5~2.0 倍）。
+#: 首检到的是腕部黑舵机（≈2370 px），画面下方底座暗块只有 ≈1000 px（0.42 倍）→ 被排除。
+AREA_RATIO = (0.5, 2.0)
+
+
+def detect_marker(rgb, kind: str, color=None, expect_px=None,
+                  ref_area=None, max_jump_px: float = MAX_JUMP_PX):
     """按标记类型检测。返回 (center_px, info_dict) 或 (None, None)"""
     if kind == "panel":
         cands = detect_dark_panel(rgb)
         if not cands:
             return None, None
+        if ref_area:
+            keep = [c for c in cands
+                    if AREA_RATIO[0] * ref_area <= c[0] <= AREA_RATIO[1] * ref_area]
+            if keep:
+                cands = keep
         if expect_px is not None:
             cands.sort(key=lambda c: np.hypot(c[1][0] - expect_px[0],
                                              c[1][1] - expect_px[1]))
+            best = cands[0]
+            d = float(np.hypot(best[1][0] - expect_px[0], best[1][1] - expect_px[1]))
+            if d > max_jump_px:
+                return None, dict(kind="panel", lost=True, nearest_px=best[1],
+                                  jump_px=d, n_cands=len(cands))
         a, c, bbox, fill, asp = cands[0]
         return np.asarray(c, float), dict(kind="panel", area=a, bbox=bbox,
-                                          fill=fill, aspect=asp)
+                                          fill=fill, aspect=asp,
+                                          n_cands=len(cands))
     cands = find_cubes(rgb)
     if not cands:
         return None, None
@@ -300,18 +506,18 @@ def detect_marker(rgb, kind: str, color=None, expect_px=None):
 
 
 def stable_marker(cam: Cam, kind: str, color=None, expect_px=None,
-                  n=FRAMES_PER_POINT):
+                  ref_area=None, n=FRAMES_PER_POINT):
     """连续取 n 帧取中位。返回 (center, spread_px, info)"""
     pts, last = [], None
     for _ in range(n):
-        c, info = detect_marker(cam.grab(), kind, color, expect_px)
+        c, info = detect_marker(cam.grab(), kind, color, expect_px, ref_area)
         if c is not None:
             pts.append(c)
             last = info
             expect_px = c
         time.sleep(0.03)
     if not pts:
-        return None, float("nan"), None
+        return None, float("nan"), last
     P = np.array(pts)
     return np.median(P, axis=0), float(np.max(np.linalg.norm(P - P.mean(0), axis=1))), last
 
@@ -474,6 +680,27 @@ def cmd_plan(kin, args) -> int:
               % (hint["x"][0], hint["x"][1], hint["y"][0], hint["y"][1]))
     return 0 if r["n_ok"] == r["n"] else 2
 
+def _marker_miss_report(rgb, kind: str, tag: str) -> None:
+    """标记找不到时打印现场信息，避免"看不见"变成无法定位的黑盒
+
+    会把**所有**暗分量（放宽形状限制）列出来，这样能区分两种情况：
+      - 面板还在画面里、只是亮度/形状变了 → 列表里能看到它
+      - 面板转出视野/被完全挡住 → 列表里根本没有它
+    """
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    v = hsv[..., 2]
+    print("  [%s] V 分位: p1 %d 中位 %d；V<80 占比 %.2f%%"
+          % (tag, np.percentile(v, 1), np.median(v), 100.0 * (v < 80).mean()))
+    if kind != "panel":
+        return
+    strict = detect_dark_panel(rgb)
+    loose = detect_dark_panel(rgb, min_fill=0.0, aspect=(1.0, 30.0), min_area=80)
+    print("  [%s] 面板候选（严格 %d 个 / 宽松 %d 个）" % (tag, len(strict), len(loose)))
+    for a, c, bb, fill, asp in loose[:6]:
+        print("      area %5d bbox %s 填充率 %.2f 长宽比 %.2f 质心 (%.0f,%.0f)"
+              % (a, bb, fill, asp, c[0], c[1]))
+
+
 def cmd_check(kin, args) -> int:
     cam = Cam()
     try:
@@ -518,6 +745,16 @@ def _connect(kin, args):
     print("从臂串口: %s" % port)
     arm = SO101Arm(port=port, calibration_path=str(args.calib))
     arm.connect(handshake=True)
+    # ⚠ connect() 内部会调 bus.configure()，而 configure() 会按 DEFAULT_PID 重写 P/I/D
+    # （当前默认 I=0）。所以任何 I 项改动**必须在 connect 之后**再写一遍，
+    # 否则会被 configure 覆盖掉（这个顺序坑很容易踩）。
+    i_term = getattr(args, "i_term", None)
+    if i_term is not None:
+        for mid in (1, 2, 3, 4, 5):
+            arm.bus.write("I_Coefficient", mid, int(i_term), num_retry=1)
+        time.sleep(0.3)
+        got = [arm.bus.read("I_Coefficient", m, num_retry=1) for m in (1, 2, 3, 4, 5)]
+        print("已设置积分项 I=%d（读回 %s）—— 用于消除重力静差" % (i_term, got))
     q = arm.read_positions()
     T = kin.fk(q)
     print("当前 TCP: x=%+.4f y=%+.4f z=%+.4f m" % tuple(T[:3, 3]))
@@ -617,6 +854,122 @@ def cmd_gripper(kin, args) -> int:
             pass
 
 
+#: 已验证可行的"好姿态"（关节角，度）—— 2026-10-06 实测从该姿态出发 9/9 标定点可达。
+#: 断电释放扭矩后机械臂会折叠下坠（TCP 离基座仅 ~5 cm），那是**接近奇异**的构型，
+#: 笛卡尔 IK 会在那里发散（实测抬升到一半偏出 44 mm），所以恢复必须走**关节空间**。
+KNOWN_GOOD_DEG = [-0.3, -94.4, 95.3, 52.7, 5.7, -39.5]
+
+
+def cmd_set_pid(kin, args) -> int:
+    """写入位置环 P/I/D 系数（EPROM，**掉电保持**）
+
+    为什么需要：P1 标定实测「舵机实际 vs 下发」在 TCP 上有中位 9.3 mm 的偏差，
+    逐关节看是**肘 +3.5°、肩 +2.7~4.6°**。连读 4 秒 Δq 逐位不变 → 不是没到位，
+    而是**静差**：位置环直流增益有限，恒定重力矩必然产生恒定偏移。
+    仓库 DEFAULT_PID 是 P16/**I0**/D32（无积分）→ 静差无法被消除。
+    实测把 I 设为 16 后：肩 1.71°→0.13°、腕 2.02°→1.05°、肩pan 0.45°→0.10°。
+    """
+    from hardware.arm import SO101Arm
+    from hardware.feetech_bus import resolve_port
+    ids = [int(v) for v in str(args.pid_joints).split(",") if v.strip()]
+    arm = SO101Arm(port=resolve_port("follower", args.port),
+                   calibration_path=str(args.calib))
+    arm.connect(handshake=True)
+    try:
+        print("写入前:")
+        for mid in ids:
+            print("  ID%d: P=%d I=%d D=%d"
+                  % (mid, arm.bus.read("P_Coefficient", mid, num_retry=1),
+                     arm.bus.read("I_Coefficient", mid, num_retry=1),
+                     arm.bus.read("D_Coefficient", mid, num_retry=1)))
+        for mid in ids:
+            if args.pid_p is not None:
+                arm.bus.write("P_Coefficient", mid, int(args.pid_p), num_retry=1)
+            if args.pid_i is not None:
+                arm.bus.write("I_Coefficient", mid, int(args.pid_i), num_retry=1)
+            if args.pid_d is not None:
+                arm.bus.write("D_Coefficient", mid, int(args.pid_d), num_retry=1)
+        time.sleep(0.4)
+        print("写入后（读回校验）:")
+        ok = True
+        for mid in ids:
+            p = arm.bus.read("P_Coefficient", mid, num_retry=1)
+            i = arm.bus.read("I_Coefficient", mid, num_retry=1)
+            d = arm.bus.read("D_Coefficient", mid, num_retry=1)
+            print("  ID%d: P=%d I=%d D=%d" % (mid, p, i, d))
+            if args.pid_i is not None and i != int(args.pid_i):
+                ok = False
+        print("⚠ P/I/D 在 EPROM 里，**掉电保持**；如需恢复请再执行一次设定原值。")
+        return 0 if ok else 2
+    finally:
+        try:
+            arm.bus.disconnect(disable_torque=False)
+            print("串口已关闭（扭矩保持）")
+        except Exception:
+            pass
+
+
+def cmd_recover(kin, args) -> int:
+    """关节空间把从臂从当前姿态插值到"已验证的好姿态"（不经过 IK）
+
+    为什么不用笛卡尔：折叠构型下 TCP 靠近基座，雅可比接近奇异，笛卡尔 IK 会发散。
+    关节空间线性插值不依赖雅可比，只要两端都在限位内就稳定。代价是 TCP 路径不可控，
+    所以每一步都用 FK 检查 TCP 高度，低于下限立即中止，避免刮到桌面。
+    """
+    if not args.confirm_motion:
+        print("✗ 该命令会驱动机器人。确认现场安全后加 --confirm-motion")
+        return 2
+    from hardware.arm import SO101Arm
+    from hardware.feetech_bus import resolve_port
+    arm = SO101Arm(port=resolve_port("follower", args.port),
+                   calibration_path=str(args.calib))
+    arm.connect(handshake=True)
+    try:
+        q_from = arm.read_positions()
+        q_to = np.deg2rad(np.array(args.target_joints if args.target_joints
+                                   else KNOWN_GOOD_DEG, dtype=float))
+        ok_lim, viol = kin.limit_violation(q_to)
+        if not ok_lim:
+            print("✗ 目标姿态越限 %.3e rad，拒绝执行" % viol)
+            return 2
+        T_from, T_to = kin.fk(q_from), kin.fk(q_to)
+        print("当前关节(度): %s" % np.round(np.degrees(q_from), 1).tolist())
+        print("目标关节(度): %s" % np.round(np.degrees(q_to), 1).tolist())
+        print("当前 TCP z=%.4f → 目标 TCP z=%.4f" % (T_from[2, 3], T_to[2, 3]))
+        z_floor = min(T_from[2, 3], T_to[2, 3]) - 0.02
+        print("TCP 高度下限 %.4f m（低于即中止，防刮桌面）" % z_floor)
+
+        steps = 120
+        for i in range(1, steps + 1):
+            q = q_from + (q_to - q_from) * (i / steps)
+            ok_lim, viol = kin.limit_violation(q)
+            if not ok_lim:
+                print("✗ 第 %d/%d 步中间姿态越限 %.3e rad，中止" % (i, steps, viol))
+                return 2
+            z = float(kin.fk(q)[2, 3])
+            if z < z_floor:
+                print("✗ 第 %d/%d 步 TCP 高度 %.4f m 低于下限，中止（姿势可能被挡住）"
+                      % (i, steps, z))
+                return 2
+            arm.write_positions(q)
+            time.sleep(0.04)
+        time.sleep(0.4)
+        q_end = arm.read_positions()
+        T_end = kin.fk(q_end)
+        print("完成。实际 TCP (%.4f, %+.4f, %.4f)，工具 z 轴 %s"
+              % (T_end[0, 3], T_end[1, 3], T_end[2, 3], np.round(T_end[:3, 2], 3).tolist()))
+        return 0
+    finally:
+        try:
+            if args.release:
+                arm.disconnect()
+            else:
+                arm.bus.disconnect(disable_torque=False)
+                print("串口已关闭（**扭矩保持**，位姿不变）")
+        except Exception:
+            pass
+
+
 def cmd_status(kin, args) -> int:
     """只读：读从臂当前姿态 + 判断"从这里出发能不能走完整片区域"。
 
@@ -654,9 +1007,11 @@ def cmd_status(kin, args) -> int:
         # 必须和 cmd_calibrate 的流程一致：**先渐近到区域中心**，再从那里扫掠。
         # 否则从远处当前姿态直接跳网格角点会失败，给出假警报（踩过）。
         dik = make_dik(kin, x_ref)
-        ok_c, why_c, q_c, _ = ik_path(dik, q, (cx, cy, args.z), steps=20)
+        ok_c, why_c, q_c, info_c = sim_lift(dik, q, (cx, cy, args.z))
+        print("  （起始工具 z 轴偏离竖直 %.1f°；原地转正=%s）"
+              % (info_c.get("start_axis_err_deg", float("nan")), info_c.get("aligned")))
         if not ok_c:
-            print("  ✗ 连区域中心都到不了: %s" % why_c)
+            print("  ✗ 到不了区域中心: %s" % why_c)
             print("\n结论: 需要先摆臂或改区域 ❌")
             return 2
         print("  渐近到区域中心 ✓（此后从中心扫掠）")
@@ -686,11 +1041,26 @@ def cmd_calibrate(kin, args) -> int:
     # 上机前先做一次**基于从臂当前姿态**的可行性预检，任何舵机动作之前。
     # 离线预检用的是演示姿态；实机姿态不同，偏航约束锁定的方向也不同，
     # 因此必须用真实起点复核一遍，否则可能出现"离线说能跑、上机卡住"。
+    #
+    # ⚠ 预检必须**和实际流程完全一致**：先渐近到区域中心，再蛇形扫掠。
+    #   曾经漏了"先到中心"这一步，直接从搁在桌面上的起始姿态跳网格角点，
+    #   于是报 2/16 不可达（第 1 步误差 0.163 m）—— 那是假警报。
     x0, x1, y0, y1 = args.region
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
     pts = snake_points(x0, x1, y0, y1, args.grid, args.z)
-    print("\n=== 上机前可行性预检（从臂当前姿态，%d 点，不写舵机）===" % len(pts))
+    print("\n=== 上机前可行性预检（与正式流程一致：先抬升分段到中心，再扫掠；不写舵机）===")
     q_now = arm.read_positions()
-    r = feasibility_sweep(make_dik(kin, x_ref), q_now, pts)
+    ok_c, why_c, q_center, info_c = sim_lift(dik, q_now, (cx, cy, args.z))
+    print("  （起始工具 z 轴偏离竖直 %.1f°；原地转正=%s）"
+          % (info_c.get("start_axis_err_deg", float("nan")), info_c.get("aligned")))
+    if not ok_c:
+        print("  ✗ 到不了区域中心（%.3f, %+.3f, z=%.3f）: %s" % (cx, cy, args.z, why_c))
+        print("  未驱动任何舵机。请把从臂摆到更接近区域中心、夹爪朝下的姿态后重试。")
+        if not args.force:
+            arm.disconnect()
+            return 2
+    print("  渐近到区域中心 ✓")
+    r = feasibility_sweep(dik, q_center, pts)
     _print_feasibility(r)
     if r["n_ok"] != r["n"]:
         print("\n✗ 有 %d 个点不可达。未驱动任何舵机。" % (r["n"] - r["n_ok"]))
@@ -707,15 +1077,23 @@ def cmd_calibrate(kin, args) -> int:
     try:
         x0, x1, y0, y1 = args.region
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-        print("\n>>> 渐近移动到区域中心（x=%.3f y=%.3f z=%.3f）" % (cx, cy, args.z))
-        ok, why = goto(dik, arm, (cx, cy, args.z))
+        print("\n>>> 分段移动到区域中心（先抬升到 z=%.3f，再平移，最后下到 z=%.3f）"
+              % (Z_SAFE, args.z))
+        ok, why = goto_lift(dik, arm, (cx, cy, args.z))
         if not ok:
             print("✗ 移动失败: %s" % why)
             return 2
         time.sleep(SETTLE_S)
+        if args.snap_dir:
+            args.snap_dir.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(args.snap_dir / "center_raw.jpg"),
+                        cv2.cvtColor(cam.grab(), cv2.COLOR_RGB2BGR))
+            print("  中心位姿原始帧 → %s" % (args.snap_dir / "center_raw.jpg"))
         c, spread, info = stable_marker(cam, args.marker, args.marker_color)
         if c is None:
-            print("✗ 中心处看不到标记。确认方块在夹爪里且在相机视野内。")
+            print("✗ 中心处看不到标记（类型 %s）。" % args.marker)
+            _marker_miss_report(cam.grab(), args.marker, "center")
+            print("  提示：若面板转出视野，可改用 --marker cube，或把相机视角调一下。")
             return 2
         print("  标记像素 (%d, %d)  抖动 %.2f px  %s" % (c[0], c[1], spread, info))
         expect = c
@@ -723,32 +1101,45 @@ def cmd_calibrate(kin, args) -> int:
         pts = snake_points(x0, x1, y0, y1, args.grid, args.z)
         print("\n>>> 扫掠 %d 个标定点" % len(pts))
         px_list, xy_list, rows = [], [], []
+        ref_area = None
         for i, (x, y, z) in enumerate(pts, 1):
-            ok, why = goto(dik, arm, (x, y, z))
+            ok, why, q_cmd = goto(dik, arm, (x, y, z))
             if not ok:
                 print("  [%2d/%d] (%.3f,%+.3f) 跳过: %s" % (i, len(pts), x, y, why))
                 rows.append(dict(i=i, x=x, y=y, ok=False, reason=why))
                 continue
             time.sleep(SETTLE_S)
             c, spread, info = stable_marker(cam, args.marker, args.marker_color,
-                                            expect_px=expect)
+                                            expect_px=expect, ref_area=ref_area)
             if c is None:
-                print("  [%2d/%d] (%.3f,%+.3f) 跳过: 看不到标记" % (i, len(pts), x, y))
+                print("  [%2d/%d] (%.3f,%+.3f) 跳过: 看不到标记 %s"
+                      % (i, len(pts), x, y, info or ""))
                 rows.append(dict(i=i, x=x, y=y, ok=False, reason="marker_not_found"))
                 continue
             expect = c
+            if ref_area is None and info and info.get("area"):
+                ref_area = float(info["area"])   # 首次检测建立面积基准，用于后续跟踪
             q_act = arm.read_positions()
             T_act = kin.fk(q_act)
             yaw = float(np.degrees(np.arctan2(T_act[1, 0], T_act[0, 0])))
             px_list.append(c)
             xy_list.append([x, y])
             fk_mm = float(np.hypot(T_act[0, 3] - x, T_act[1, 3] - y) * 1000)
+            # 逐关节量化"舵机实际 vs 下发"：静态误差集中在哪个关节（重力下垂）
+            dq = np.degrees(np.asarray(q_act) - np.asarray(q_cmd)) if q_cmd is not None \
+                else np.zeros(6)
             rows.append(dict(i=i, x=x, y=y, ok=True, px=c.tolist(), spread_px=spread,
                              marker=info, yaw_deg=yaw,
                              fk_xy=[float(T_act[0, 3]), float(T_act[1, 3])],
-                             fk_err_mm=fk_mm))
+                             fk_err_mm=fk_mm,
+                             dq_deg=[float(v) for v in dq],
+                             q_cmd_deg=[float(v) for v in np.degrees(q_cmd)]
+                             if q_cmd is not None else None,
+                             q_act_deg=[float(v) for v in np.degrees(q_act)]))
             print("  [%2d/%d] (%.3f,%+.3f) px=(%4d,%4d) 抖动%.2f 偏航%+7.2f°  舵机偏差 %5.2f mm"
-                  % (i, len(pts), x, y, c[0], c[1], spread, yaw, fk_mm))
+                  "  Δq(°) %s"
+                  % (i, len(pts), x, y, c[0], c[1], spread, yaw, fk_mm,
+                     np.round(dq, 2).tolist()))
 
         good = [r for r in rows if r.get("ok")]
         if len(good) < 4:
@@ -794,8 +1185,12 @@ def cmd_calibrate(kin, args) -> int:
     finally:
         cam.close()
         try:
-            arm.disconnect()
-            print("从臂已断开（扭矩已释放，机械臂会松脱下垂，请扶住）")
+            if args.release:
+                arm.disconnect()
+                print("从臂已断开（扭矩已释放，机械臂会松脱下垂，请扶住）")
+            else:
+                arm.bus.disconnect(disable_torque=False)
+                print("从臂串口已关闭（**扭矩保持**，位姿不变；如需放开请加 --release）")
         except Exception:
             pass
 
@@ -833,21 +1228,23 @@ def cmd_verify(kin, args) -> int:
 
         goto(dik, arm, ((x0 + x1) / 2, (y0 + y1) / 2, z))
         time.sleep(SETTLE_S)
-        mkind = cal.get("marker_kind", "cube")
+        mkind = cal.get("marker_kind", "panel")
         mcolor = cal.get("marker_color")
-        expect, _, _ = stable_marker(cam, mkind, mcolor)
+        expect, _, info0 = stable_marker(cam, mkind, mcolor)
         if expect is None:
             print("✗ 看不到标记")
             return 2
+        ref_area = float(info0["area"]) if info0 and info0.get("area") else None
 
         rows = []
         for i, (x, y, zz) in enumerate(pts, 1):
-            ok, why = goto(dik, arm, (x, y, zz))
+            ok, why, _ = goto(dik, arm, (x, y, zz))
             if not ok:
                 print("  [%2d/%d] 跳过: %s" % (i, len(pts), why))
                 continue
             time.sleep(SETTLE_S)
-            c, spread, info = stable_marker(cam, mkind, mcolor, expect_px=expect)
+            c, spread, info = stable_marker(cam, mkind, mcolor, expect_px=expect,
+                                            ref_area=ref_area)
             if c is None:
                 print("  [%2d/%d] 跳过: 看不到标记" % (i, len(pts)))
                 continue
@@ -912,6 +1309,21 @@ def main() -> int:
     g.add_argument("--check", action="store_true", help="只读检查相机能否看到标记")
     g.add_argument("--status", action="store_true",
                    help="只读：读从臂当前姿态 + 从该姿态出发的可行性（不改扭矩）")
+    g.add_argument("--set-pid", action="store_true",
+                   help="写入位置环 P/I/D（EPROM 掉电保持）。用 --pid-i 16 可消除重力静差")
+    ap.add_argument("--pid-p", type=int, default=None)
+    ap.add_argument("--pid-i", type=int, default=None)
+    ap.add_argument("--pid-d", type=int, default=None)
+    ap.add_argument("--pid-joints", default="1,2,3,4,5",
+                    help="要改的舵机 ID（默认 1~5；夹爪 6 通常不动，避免改变夹持行为）")
+    ap.add_argument("--i-term", type=int, default=None,
+                    help="连接后把 1~5 号舵机的积分项设为该值（消除重力静差；"
+                         "必须在 connect 之后写，否则会被 configure 覆盖）")
+    g.add_argument("--recover", action="store_true",
+                   help="关节空间把从臂恢复到一个已验证可行的姿态（从折叠姿态救回来用）")
+    ap.add_argument("--target-joints", type=float, nargs=6, default=None,
+                    metavar=("J1", "J2", "J3", "J4", "J5", "J6"),
+                    help="--recover 的目标关节角（度），默认用已知可行姿态")
     g.add_argument("--gripper", type=float, metavar="W_M",
                    help="只动夹爪：把夹爪开到宽度 W_M 米（注意米制映射是近似的）")
     g.add_argument("--grip-until-contact", action="store_true",
@@ -942,6 +1354,11 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--snap", type=Path, default=None,
                     help="--check 时把标注图存到该路径（便于人眼复核相机看到的场景）")
+    ap.add_argument("--snap-dir", type=Path, default=None,
+                    help="--calibrate 时把中心位姿的原始帧存到该目录（排查标记看不到）")
+    ap.add_argument("--release", action="store_true",
+                    help="结束时释放扭矩（默认**保持扭矩**：一旦释放，机械臂会折叠下坠到"
+                         "贴近桌面的姿态，下次运行要从那个姿态重新构型，实测会卡在局部极小）")
     ap.add_argument("--confirm-motion", action="store_true",
                     help="确认现场安全、允许驱动机器人（--calibrate/--verify 必需）")
     ap.add_argument("--force", action="store_true",
@@ -959,6 +1376,10 @@ def main() -> int:
         return cmd_check(kin, args)
     if args.status:
         return cmd_status(kin, args)
+    if args.set_pid:
+        return cmd_set_pid(kin, args)
+    if args.recover:
+        return cmd_recover(kin, args)
     if args.gripper is not None or args.grip_until_contact:
         return cmd_gripper(kin, args)
     if args.calibrate:
