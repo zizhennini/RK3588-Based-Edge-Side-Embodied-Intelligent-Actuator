@@ -5,11 +5,26 @@
 判据（docs/测试方案_VLM+外部IK+抓取.md P1）：
     指定目标点 → IK → 执行 → 相机实测末端偏差 **≤5 mm**（10 个目标点）
 
-标记的选择
-----------
-要测"末端实际到哪了"，就得让相机**看见**末端。白色机械臂在木桌背景上很难稳定分割
-（P0 实测：白平衡把塑料染成淡蓝，H=101，与蓝方块 H=103 几乎重合），而彩色方块有
-0.7 px 的定位精度（P0-b）。故让从臂夹一个方块当"随动标记"。
+标记的选择（换过一次，原因是实测踩坑）
+--------------------------------------
+要测"末端实际到哪了"，就得让相机**看见**末端。最初的设计是让从臂**夹一个彩色方块**
+当随动标记 —— 理由是白色机械臂在木桌背景上难稳定分割（P0 实测白平衡把塑料染成淡蓝、
+H=101，与蓝方块 H=103 几乎重合），而方块有 0.7 px 的定位精度。
+
+**但这个设计实测失败**：相机是前上方俯视，而夹爪朝下，**夹爪本体把夹在下面的方块
+完全挡住了** —— 夹住红方块后画面里只剩桌上 5 个候选，被夹的红方块一个像素都看不到。
+
+改用**夹爪上本来就有的黑色矩形面板**当标记。它在原始帧里非常干净：
+V<60/80/100 三个阈值下稳定给出 bbox≈(251,315,42,19)、**填充率 0.78~0.84**（实心矩形），
+而画面里其它暗分量（线材/底座/云台）填充率只有 0.18~0.45，故「高填充率 + 矩形」即可
+唯一锁定。好处是不需要任何额外物品，也不用往夹爪里塞东西。
+
+刚性说明：该面板在 wrist_flex 之后的连杆上。本工具**已经用弱约束把偏航钉死**（实测跨度
+0.14°），而偏航对应的正是 wrist_roll 的转角 —— 所以 wrist_flex 之后的任何特征相对 TCP
+都是刚性的，不要求它必须在 gripper_link 上。
+
+⚠️ 教训：做颜色/亮度统计**必须在未标注的原始帧上做**。我曾在 draw_candidates 画过红框的
+图上统计"红色像素"，把注释框（纯红 255,0,0）当成了"露出来的红方块"。
 
 为什么不需要尺子、也不会有视差误差
 ----------------------------------
@@ -50,6 +65,8 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import cv2  # noqa: E402  （模块级导入：detect_dark_panel / fit_homography / 存图都要用）
 
 from hardware.so101_kinematics import So101Kinematics  # noqa: E402
 from perception.cube_locator import COLOR_ZH, find_cubes  # noqa: E402
@@ -215,7 +232,58 @@ class Cam:
             pass
 
 
-def detect_marker(rgb, color, expect_px=None):
+def detect_dark_panel(rgb, v_max: int = 80, min_area: int = 180, max_area: int = 3000,
+                      min_fill: float = 0.62, aspect=(1.15, 3.4), y_min: int = 250):
+    """找夹爪上的**黑色矩形面板**（比"夹在夹爪里的方块"更好的标记）
+
+    为什么换掉方块标记：相机是从前上方俯视，**夹爪本体把夹在下面的方块完全挡住了**
+    （实测：夹住红方块后画面里只剩桌上 5 个候选，红方块一个像素都看不到）。
+    而夹爪上本来就有一块明显的黑色矩形面板，实测在 V<60/80/100 三个阈值下都稳定给出
+    bbox≈(251,315,42,19)、**填充率 0.78~0.84**（实心矩形）；画面里其它暗分量填充率只有
+    0.18~0.45（线材、底座、云台），因此"高填充率 + 矩形"就能唯一锁定它。
+
+    刚性说明：该面板位于 wrist_flex 之后的连杆上（手腕/夹爪段）。而本工具**已经用弱约束
+    把偏航钉死**（实测跨度 0.14°），偏航对应的正是 wrist_roll 的转角，所以 wrist_flex 之后
+    的任何特征相对 TCP 都是刚性的 —— 不需要它是 gripper_link 上的东西。
+
+    Returns: [(area, (cx,cy), (x,y,w,h), fill, aspect)] 按面积降序
+    """
+    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
+    v = hsv[..., 2]
+    mask = ((v < v_max).astype(np.uint8)) * 255
+    n, _lab, stats, cents = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    out = []
+    for i in range(1, n):
+        a = int(stats[i, cv2.CC_STAT_AREA])
+        if a < min_area or a > max_area:
+            continue
+        x, y = int(stats[i, cv2.CC_STAT_LEFT]), int(stats[i, cv2.CC_STAT_TOP])
+        w, h = int(stats[i, cv2.CC_STAT_WIDTH]), int(stats[i, cv2.CC_STAT_HEIGHT])
+        if y < y_min:
+            continue
+        fill = a / float(w * h)
+        if fill < min_fill:
+            continue
+        asp = max(w, h) / float(min(w, h))
+        if not (aspect[0] <= asp <= aspect[1]):
+            continue
+        out.append((a, (float(cents[i][0]), float(cents[i][1])), (x, y, w, h), fill, asp))
+    out.sort(key=lambda c: -c[0])
+    return out
+
+
+def detect_marker(rgb, kind: str, color=None, expect_px=None):
+    """按标记类型检测。返回 (center_px, info_dict) 或 (None, None)"""
+    if kind == "panel":
+        cands = detect_dark_panel(rgb)
+        if not cands:
+            return None, None
+        if expect_px is not None:
+            cands.sort(key=lambda c: np.hypot(c[1][0] - expect_px[0],
+                                             c[1][1] - expect_px[1]))
+        a, c, bbox, fill, asp = cands[0]
+        return np.asarray(c, float), dict(kind="panel", area=a, bbox=bbox,
+                                          fill=fill, aspect=asp)
     cands = find_cubes(rgb)
     if not cands:
         return None, None
@@ -225,17 +293,21 @@ def detect_marker(rgb, color, expect_px=None):
     if expect_px is not None:
         cands.sort(key=lambda c: np.hypot(c.center[0] - expect_px[0],
                                          c.center[1] - expect_px[1]))
-    return np.asarray(cands[0].center, dtype=float), cands[0]
+    cub = cands[0]
+    return np.asarray(cub.center, float), dict(kind="cube", color=cub.color, area=cub.area,
+                                               bbox=list(cub.bbox), fill=cub.extent,
+                                               aspect=0.0)
 
 
-def stable_marker(cam: Cam, color, expect_px=None, n=FRAMES_PER_POINT):
-    """连续取 n 帧取中位。返回 (center, spread_px, cand)"""
+def stable_marker(cam: Cam, kind: str, color=None, expect_px=None,
+                  n=FRAMES_PER_POINT):
+    """连续取 n 帧取中位。返回 (center, spread_px, info)"""
     pts, last = [], None
     for _ in range(n):
-        c, cand = detect_marker(cam.grab(), color, expect_px)
+        c, info = detect_marker(cam.grab(), kind, color, expect_px)
         if c is not None:
             pts.append(c)
-            last = cand
+            last = info
             expect_px = c
         time.sleep(0.03)
     if not pts:
@@ -406,24 +478,34 @@ def cmd_check(kin, args) -> int:
     cam = Cam()
     try:
         rgb = cam.grab()
-        cands = find_cubes(rgb)
-        print("检测到候选 %d 个: %s"
-              % (len(cands), [(c.color, [round(v) for v in c.center]) for c in cands]))
-        c, cand = detect_marker(rgb, args.marker_color)
+        kind = args.marker
+        cands = detect_dark_panel(rgb) if kind == "panel" else find_cubes(rgb)
+        print("标记类型=%s，候选 %d 个" % (kind, len(cands)))
+        for c in cands[:8]:
+            if kind == "panel":
+                print("   area %5d  bbox %s  填充率 %.2f  长宽比 %.2f  质心 (%.0f,%.0f)"
+                      % (c[0], c[2], c[3], c[4], c[1][0], c[1][1]))
+            else:
+                print("   %-7s 质心 (%3.0f,%3.0f)  面积 %4d  边长 %.1f"
+                      % (c.color, c.center[0], c.center[1], c.area, c.side_px))
         if args.snap:
             import cv2
             from perception.cube_locator import draw_candidates
             args.snap.parent.mkdir(parents=True, exist_ok=True)
-            cv2.imwrite(str(args.snap), cv2.cvtColor(draw_candidates(rgb, cands),
-                                                     cv2.COLOR_RGB2BGR))
+            vis = draw_candidates(rgb, cands) if kind == "cube" else rgb.copy()
+            if kind == "panel":
+                for a, cc, bb, fill, asp in cands[:8]:
+                    x, y, w, h = bb
+                    cv2.rectangle(vis, (x, y), (x + w, y + h), (255, 0, 0), 2)
+                    cv2.drawMarker(vis, (int(cc[0]), int(cc[1])), (0, 255, 0),
+                                   cv2.MARKER_CROSS, 11, 2)
+            cv2.imwrite(str(args.snap), cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
             print("  标注图已存 %s" % args.snap)
+        c, info = detect_marker(rgb, kind, args.marker_color)
         if c is None:
-            print("✗ 没找到标记。请把要夹的方块放进夹爪，并清掉桌面其它方块。")
+            print("✗ 没找到标记（类型 %s）" % kind)
             return 2
-        print("✓ 标记: 颜色 %s  像素 (%d, %d)  面积 %d px  边长 %.1f px"
-              % (COLOR_ZH.get(cand.color, cand.color), c[0], c[1], cand.area, cand.side_px))
-        if len(cands) > 1:
-            print("  ⚠ 有多个候选：确认哪个是夹爪里的标记；必要时用 --marker-color 指定")
+        print("✓ 标记: %s  像素 (%d, %d)" % (info, c[0], c[1]))
         return 0
     finally:
         cam.close()
@@ -453,9 +535,14 @@ def _xref_from(T):
 def cmd_gripper(kin, args) -> int:
     """只动夹爪一个关节（用来把标记方块放进夹爪 / 夹住）。
 
-    只写夹爪舵机，其余 5 个关节不动 → 是本工具里最安全的"上机"动作。
-    ``gripper_width`` 把米制宽度线性映射到夹爪 raw 行程（range_min=全闭, range_max≈0.08m 全开），
-    写入值被限制在该行程内，不会超出实机限位。
+    两种模式：
+      --gripper W         直接写到宽度 W（米）
+      --grip-until-contact 从当前开度**逐步闭合**，读到负载上升就停
+
+    为什么需要后一种：``gripper_width`` 把米制宽度按 **0.08 m 满量程线性**折算到 raw 行程，
+    但夹爪真实最大开口并未实测过。按不准确的映射一次闭到底，可能夹过头 → 舵机持续堵转
+    （虽有 Max_Torque 50% / Protection_Current 50% 保护，仍不该长时间这样）。
+    逐步闭合 + 负载判接触是仓库既有的抓取判据（``gripper_current``），也更适合复用。
     """
     from hardware.arm import SO101Arm
     from hardware.feetech_bus import resolve_port
@@ -463,18 +550,64 @@ def cmd_gripper(kin, args) -> int:
     arm = SO101Arm(port=port, calibration_path=str(args.calib))
     arm.connect(handshake=True)
     try:
-        q = arm.read_positions()
         cal = arm.calibration["6"]
-        raw = arm._rad_to_raw(6, q[5])
-        print("夹爪当前: 角度 %+.2f°  raw %d  （标定行程 %d~%d，越小越闭）"
-              % (np.degrees(q[5]), raw, int(cal["range_min"]), int(cal["range_max"])))
-        print(">>> 写入宽度 %.4f m" % args.gripper)
-        arm.gripper_width(args.gripper)
-        time.sleep(0.8)
-        q2 = arm.read_positions()
-        print("写入后: 角度 %+.2f°  raw %d"
-              % (np.degrees(q2[5]), arm._rad_to_raw(6, q2[5])))
-        print("（若没到位，可再执行一次；夹到东西时舵机可能停在略小的开度）")
+        rmin, rmax = int(cal["range_min"]), int(cal["range_max"])
+
+        def show(tag):
+            q = arm.read_positions()
+            raw = arm._rad_to_raw(6, q[5])
+            d = arm.bus.read_diagnostics([6]).get(6, {})
+            load = d.get("load")
+            print("  %-8s 角度 %+7.2f°  raw %4d  负载 %s  电流 %s mA  温度 %s"
+                  % (tag, np.degrees(q[5]), raw,
+                     ("%.1f%% %s" % load) if load else "n/a",
+                     d.get("current_mA"), d.get("temperature")))
+            return raw, (load[0] if load else 0.0)
+
+        print("夹爪标定行程 %d~%d（越小越闭）" % (rmin, rmax))
+        show("闭合前")
+
+        if args.grip_until_contact:
+            print(">>> 逐步闭合直到接触（负载 ≥ %.1f%% 即停）" % args.contact_load)
+            hit = False
+            for i in range(24):
+                w = 0.060 - i * 0.004
+                if w < 0.002:
+                    break
+                arm.gripper_width(w)
+                time.sleep(0.7)
+                raw, load = show("w=%.3f" % w)
+                if load >= args.contact_load:
+                    print("  ✅ 检测到接触（负载 %.1f%% ≥ %.1f%%）" % (load, args.contact_load))
+                    hit = True
+                    break
+                if raw <= rmin + 5:
+                    print("  ⚠ 已到闭合行程下限仍未检测到负载上升")
+                    break
+            if hit and args.backoff > 0:
+                # 关键：接触后必须**回退一点**，否则舵机持续堵转。
+                # 实测教训：不回退导致夹爪在 21.6% 负载 / 143 mA 下堵转约 3 分钟，
+                # 温度 37→45℃，舵机锁死 Overload 保护态（寻址 ping 不再应答，
+                # 只能读寄存器；须断电重上电才能恢复）。
+                back = 0.002 + args.backoff
+                print(">>> 回退 %.4f m 释放堵转（必须做，否则会再次锁过载）" % (args.backoff))
+                q = arm.read_positions()
+                raw_now = arm._rad_to_raw(6, q[5])
+                target_raw = min(rmax, raw_now + 62)   # 62 count ≈ 5.5°，够松开夹持力
+                arm.bus.write("Goal_Position", 6, target_raw)
+                time.sleep(0.8)
+                show("回退后")
+                print("  提示：夹持已放松。**不要**让它长时间保持夹紧 —— 过载保护会锁死。")
+        else:
+            print(">>> 写入宽度 %.4f m" % args.gripper)
+            arm.gripper_width(args.gripper)
+            time.sleep(0.9)
+            raw, load = show("闭合后")
+            if load >= args.contact_load:
+                print("  ✅ 负载 %.1f%% → 已夹住东西" % load)
+            elif raw <= rmin + 5:
+                print("  ⚠ 已到行程下限、负载仍为 0 → 夹爪是空的")
+        print("（若没到位可再执行一次）")
         return 0
     finally:
         try:
@@ -580,12 +713,11 @@ def cmd_calibrate(kin, args) -> int:
             print("✗ 移动失败: %s" % why)
             return 2
         time.sleep(SETTLE_S)
-        c, spread, cand = stable_marker(cam, args.marker_color)
+        c, spread, info = stable_marker(cam, args.marker, args.marker_color)
         if c is None:
             print("✗ 中心处看不到标记。确认方块在夹爪里且在相机视野内。")
             return 2
-        print("  标记像素 (%d, %d)  抖动 %.2f px  颜色 %s"
-              % (c[0], c[1], spread, COLOR_ZH.get(cand.color, cand.color)))
+        print("  标记像素 (%d, %d)  抖动 %.2f px  %s" % (c[0], c[1], spread, info))
         expect = c
 
         pts = snake_points(x0, x1, y0, y1, args.grid, args.z)
@@ -598,7 +730,8 @@ def cmd_calibrate(kin, args) -> int:
                 rows.append(dict(i=i, x=x, y=y, ok=False, reason=why))
                 continue
             time.sleep(SETTLE_S)
-            c, spread, cand = stable_marker(cam, args.marker_color, expect_px=expect)
+            c, spread, info = stable_marker(cam, args.marker, args.marker_color,
+                                            expect_px=expect)
             if c is None:
                 print("  [%2d/%d] (%.3f,%+.3f) 跳过: 看不到标记" % (i, len(pts), x, y))
                 rows.append(dict(i=i, x=x, y=y, ok=False, reason="marker_not_found"))
@@ -611,7 +744,7 @@ def cmd_calibrate(kin, args) -> int:
             xy_list.append([x, y])
             fk_mm = float(np.hypot(T_act[0, 3] - x, T_act[1, 3] - y) * 1000)
             rows.append(dict(i=i, x=x, y=y, ok=True, px=c.tolist(), spread_px=spread,
-                             color=cand.color, yaw_deg=yaw,
+                             marker=info, yaw_deg=yaw,
                              fk_xy=[float(T_act[0, 3]), float(T_act[1, 3])],
                              fk_err_mm=fk_mm))
             print("  [%2d/%d] (%.3f,%+.3f) px=(%4d,%4d) 抖动%.2f 偏航%+7.2f°  舵机偏差 %5.2f mm"
@@ -641,7 +774,8 @@ def cmd_calibrate(kin, args) -> int:
             kind="planar_homography_pixel_to_base_xy",
             H=H.tolist(), created=time.strftime("%Y-%m-%d %H:%M:%S"),
             z_m=float(args.z), x_ref=x_ref.tolist(), yaw_weight=YAW_WEIGHT,
-            marker_color=args.marker_color, region=list(map(float, args.region)),
+            marker_kind=args.marker, marker_color=args.marker_color,
+            region=list(map(float, args.region)),
             grid=int(args.grid), calib_fingerprint=kin.calib_fingerprint,
             urdf=str(kin.urdf), n_points=len(good), n_inliers=int(np.sum(inl)),
             yaw_span_deg=float(yaws.max() - yaws.min()),
@@ -699,7 +833,9 @@ def cmd_verify(kin, args) -> int:
 
         goto(dik, arm, ((x0 + x1) / 2, (y0 + y1) / 2, z))
         time.sleep(SETTLE_S)
-        expect, _, _ = stable_marker(cam, cal.get("marker_color"))
+        mkind = cal.get("marker_kind", "cube")
+        mcolor = cal.get("marker_color")
+        expect, _, _ = stable_marker(cam, mkind, mcolor)
         if expect is None:
             print("✗ 看不到标记")
             return 2
@@ -711,7 +847,7 @@ def cmd_verify(kin, args) -> int:
                 print("  [%2d/%d] 跳过: %s" % (i, len(pts), why))
                 continue
             time.sleep(SETTLE_S)
-            c, spread, cand = stable_marker(cam, cal.get("marker_color"), expect_px=expect)
+            c, spread, info = stable_marker(cam, mkind, mcolor, expect_px=expect)
             if c is None:
                 print("  [%2d/%d] 跳过: 看不到标记" % (i, len(pts)))
                 continue
@@ -777,7 +913,13 @@ def main() -> int:
     g.add_argument("--status", action="store_true",
                    help="只读：读从臂当前姿态 + 从该姿态出发的可行性（不改扭矩）")
     g.add_argument("--gripper", type=float, metavar="W_M",
-                   help="只动夹爪：把夹爪开到宽度 W_M 米（放标记方块/夹住用）")
+                   help="只动夹爪：把夹爪开到宽度 W_M 米（注意米制映射是近似的）")
+    g.add_argument("--grip-until-contact", action="store_true",
+                   help="只动夹爪：逐步闭合直到负载上升（夹住标记方块，比按宽度闭更安全）")
+    ap.add_argument("--contact-load", type=float, default=5.0,
+                    help="判定「已接触」的负载阈值（%%，默认 5）")
+    ap.add_argument("--backoff", type=float, default=0.004,
+                    help="检测到接触后回退的宽度（米），用于释放堵转，默认 4 mm")
     g.add_argument("--calibrate", action="store_true", help="扫掠标定（动机器人）")
     g.add_argument("--verify", action="store_true", help="定位精度验证（动机器人）")
     ap.add_argument("--region", type=float, nargs=4,
@@ -786,8 +928,11 @@ def main() -> int:
     ap.add_argument("--z", type=float, default=DEF_Z, help="扫掠高度 TCP z（米）")
     ap.add_argument("--grid", type=int, default=3, help="标定网格边长（3=9 点）")
     ap.add_argument("--points", type=int, default=10, help="验证点数")
+    ap.add_argument("--marker", choices=["panel", "cube"], default="panel",
+                    help="标记类型。panel=夹爪上的黑色矩形面板（默认，无需额外物品，"
+                         "实测方块被夹爪挡住看不见）；cube=夹在夹爪里的彩色方块")
     ap.add_argument("--marker-color", default=None,
-                    help="标记方块颜色（red/orange/yellow/green/blue/purple）；默认自动")
+                    help="--marker cube 时指定方块颜色（red/orange/...）；默认自动")
     ap.add_argument("--port", default="/dev/ttyACM0")
     ap.add_argument("--calib", type=Path, default=REPO / "config" / "calibration.json")
     ap.add_argument("--data", type=Path, default=REPO / "data" / "raw" / "pick_place")
@@ -814,7 +959,7 @@ def main() -> int:
         return cmd_check(kin, args)
     if args.status:
         return cmd_status(kin, args)
-    if args.gripper is not None:
+    if args.gripper is not None or args.grip_until_contact:
         return cmd_gripper(kin, args)
     if args.calibrate:
         return cmd_calibrate(kin, args)
