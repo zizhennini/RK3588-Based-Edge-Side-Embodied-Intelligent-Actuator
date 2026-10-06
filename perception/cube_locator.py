@@ -116,15 +116,19 @@ class CubeCandidate:
 # ---------------------------------------------------------------------------
 # 掩码
 # ---------------------------------------------------------------------------
+def _colorful_from_hsv(hsv: np.ndarray, sat_min: int, val_min: int) -> np.ndarray:
+    """已算出 HSV 时直接出掩码（避免重复 cvtColor）"""
+    s, v = hsv[..., 1], hsv[..., 2]
+    return (((s > sat_min) & (v > val_min)).astype(np.uint8)) * 255
+
+
 def colorful_mask(rgb: np.ndarray, sat_min: int = SAT_MIN,
                   val_min: int = VAL_MIN) -> np.ndarray:
     """高饱和像素掩码 (H,W) uint8 0/255
 
     sat_min/val_min 可调 —— P0-b 的鲁棒性测试会扰这两个门限看中心漂移多少。
     """
-    hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
-    s, v = hsv[..., 1], hsv[..., 2]
-    return (((s > sat_min) & (v > val_min)).astype(np.uint8)) * 255
+    return _colorful_from_hsv(cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV), sat_min, val_min)
 
 
 def hue_mask(rgb: np.ndarray, color: str) -> np.ndarray:
@@ -206,18 +210,23 @@ def _angle_spread(mask: np.ndarray) -> float:
 # ---------------------------------------------------------------------------
 # 主入口
 # ---------------------------------------------------------------------------
-def _reject_arm_like(comp_mask: np.ndarray, bbox, hsv: np.ndarray,
-                     img_h: int) -> Optional[str]:
-    """白臂误检剔除。返回拒绝原因，None 表示保留"""
+def _reject_arm_like(roi_hsv: np.ndarray, roi_mask: np.ndarray,
+                     bbox, img_h: int) -> Optional[str]:
+    """白臂误检剔除。返回拒绝原因，None 表示保留
+
+    只在小 ROI 上统计（原来在全图上按分量布尔索引取中位，是主要耗时来源之一）。
+    """
     x, y, w, h = bbox
     # 1) 触底（机械臂总是从画面底边进入）
     if y + h >= img_h - REJECT_BOTTOM_MARGIN:
         return "touches_bottom"
     # 2) 淡蓝白（臂的塑料被白平衡染蓝）：H 与蓝色方块重合，靠 S 区分
-    h_, s_, v_ = hsv[..., 0], hsv[..., 1], hsv[..., 2]
-    mh = float(np.median(h_[comp_mask]))
-    ms = float(np.median(s_[comp_mask]))
-    mv = float(np.median(v_[comp_mask]))
+    sel = roi_mask.astype(bool)
+    if not sel.any():
+        return "empty"
+    mh = float(np.median(roi_hsv[..., 0][sel]))
+    ms = float(np.median(roi_hsv[..., 1][sel]))
+    mv = float(np.median(roi_hsv[..., 2][sel]))
     if ARM_HUE[0] <= mh <= ARM_HUE[1] and ms <= ARM_SAT_MAX and mv >= ARM_VAL_MIN:
         return "arm_like_color"
     return None
@@ -229,8 +238,13 @@ def find_cubes(rgb: np.ndarray,
                val_min: int = VAL_MIN,
                morph: int = 0,
                erode: int = 0,
-               dilate: int = 0) -> List[CubeCandidate]:
+               dilate: int = 0,
+               diagnostics: bool = False) -> List[CubeCandidate]:
     """在 RGB 图中找所有立方体候选
+
+    性能：只在**各分量的 ROI 小图**上做 findContours / 中位统计，不在全图上反复
+    按分量布尔索引（那样 ~5 个分量就要 40 ms）。实测 640×480 上中位 40.7 ms → 优化后见
+    `tools/cv_localization_bench.py --mode timing`。
 
     Args:
         rgb: (H,W,3) uint8 **RGB**
@@ -238,12 +252,15 @@ def find_cubes(rgb: np.ndarray,
         sat_min/val_min: 彩色门限（鲁棒性测试用）
         morph: 形态学开运算迭代次数（默认 0 —— 实测开运算会啃掉小方块边缘）
         erode/dilate: 额外腐蚀/膨胀，鲁棒性测试用
+        diagnostics: 额外算 PCA 朝向与角度离散度（P0-b 交叉校验用）。
+            **默认关闭**：它要对每个分量再跑两次轮廓 + 一次 eigh，纯诊断信息，
+            控制回路不需要。
 
     Returns:
         按面积降序的候选列表
     """
     hsv = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)
-    mask = colorful_mask(rgb, sat_min=sat_min, val_min=val_min)
+    mask = _colorful_from_hsv(hsv, sat_min, val_min)
     if erode > 0:
         mask = cv2.erode(mask, None, iterations=erode)
     if dilate > 0:
@@ -251,20 +268,24 @@ def find_cubes(rgb: np.ndarray,
     if morph > 0:
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, None, iterations=morph)
 
-    n, lab = cv2.connectedComponents(mask, connectivity=8)
+    # 一次拿到 area / bbox / 质心，省掉逐分量 np.nonzero + moments
+    n, lab, stats, cents = cv2.connectedComponentsWithStats(mask, connectivity=8)
     out: List[CubeCandidate] = []
-    H = rgb.shape[0]
+    img_h = rgb.shape[0]
     for i in range(1, n):
-        comp = (lab == i)
-        area = int(comp.sum())
+        x0, y0, w, h, area = (int(stats[i, cv2.CC_STAT_LEFT]),
+                              int(stats[i, cv2.CC_STAT_TOP]),
+                              int(stats[i, cv2.CC_STAT_WIDTH]),
+                              int(stats[i, cv2.CC_STAT_HEIGHT]),
+                              int(stats[i, cv2.CC_STAT_AREA]))
         if area < MIN_AREA or area > MAX_AREA:
             continue
-        ys, xs = np.nonzero(comp)
-        x0, x1, y0, y1 = int(xs.min()), int(xs.max()), int(ys.min()), int(ys.max())
-        w, h = x1 - x0 + 1, y1 - y0 + 1
 
-        m8 = (comp.astype(np.uint8)) * 255
-        rect = _fitted_rect(m8)
+        # 分量 ROI 小图（~40×40），后续所有几何/颜色统计都在这里做
+        roi_mask = np.ascontiguousarray((lab[y0:y0 + h, x0:x0 + w] == i).astype(np.uint8)) * 255
+        roi_hsv = hsv[y0:y0 + h, x0:x0 + w]
+
+        rect = _fitted_rect(roi_mask)
         if rect is None:
             continue
         (_, _), (rw, rh), _ = rect
@@ -275,28 +296,34 @@ def find_cubes(rgb: np.ndarray,
         if rect_fill < RECT_FILL_MIN or rect_aspect > RECT_ASPECT_MAX:
             continue
 
-        reason = _reject_arm_like(comp, (x0, y0, w, h), hsv, H)
+        reason = _reject_arm_like(roi_hsv, roi_mask, (x0, y0, w, h), img_h)
         if reason is not None:
             continue
 
-        mh = float(np.median(hsv[..., 0][comp]))
-        ms = int(np.median(hsv[..., 1][comp]))
-        mv = int(np.median(hsv[..., 2][comp]))
+        sel = roi_mask.astype(bool)
+        mh = float(np.median(roi_hsv[..., 0][sel]))
+        ms = int(np.median(roi_hsv[..., 1][sel]))
+        mv = int(np.median(roi_hsv[..., 2][sel]))
         color = classify_hue(mh)
         if color is None:
             continue
         if colors is not None and color not in colors:
             continue
 
-        cx, cy = _centroid(m8)
+        extra = dict(rect_fill=rect_fill, rect_aspect=rect_aspect,
+                     rect_size=(float(rw), float(rh)), algo="minarearect")
+        if diagnostics:
+            extra["angle_pca"] = _angle_pca(roi_mask)
+            extra["angle_spread"] = _angle_spread(roi_mask)
+            # 注意：这是**分量 ROI 小图**，不是全图掩码。调用方若要按掩码算几何量，
+            # 必须加上 roi_origin 才是全图坐标。
+            extra["roi_mask"] = roi_mask
+            extra["roi_origin"] = (x0, y0)
         out.append(CubeCandidate(
-            color=color, center=(cx, cy), angle_deg=_angle_from_rect(rect),
-            area=area, bbox=(x0, y0, w, h), extent=rect_fill,
-            side_px=float(np.sqrt(area)), median_hsv=(int(mh), ms, mv),
-            extra=dict(angle_pca=_angle_pca(m8), angle_spread=_angle_spread(m8),
-                       rect_fill=rect_fill, rect_aspect=rect_aspect,
-                       rect_size=(float(rw), float(rh)),
-                       centroid=m8, algo="minarearect"),
+            color=color, center=(float(cents[i][0]), float(cents[i][1])),
+            angle_deg=_angle_from_rect(rect), area=area, bbox=(x0, y0, w, h),
+            extent=rect_fill, side_px=float(np.sqrt(area)),
+            median_hsv=(int(mh), ms, mv), extra=extra,
         ))
     out.sort(key=lambda c: -c.area)
     return out

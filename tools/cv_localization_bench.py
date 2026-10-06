@@ -119,17 +119,19 @@ def part_a(seed: int = 0) -> dict:
                 cy = float(rng.uniform(100, H - 160))
                 img = render_scene(color, cx, cy, side, ang, rng, noise=6.0,
                                    blur=3 if side < 25 else 0, jpeg=85)
-                cands = find_cubes(img, colors=[color])
+                cands = find_cubes(img, colors=[color], diagnostics=True)
                 if not cands:
                     rows.append(dict(color=color, side=side, angle=ang, found=False))
                     continue
                 c = max(cands, key=lambda k: k.area)
-                m8 = c.extra["centroid"]
+                m8, (ox, oy) = c.extra["roi_mask"], c.extra["roi_origin"]
                 d_centroid = float(np.hypot(c.center[0] - cx, c.center[1] - cy))
                 rc = _rect_center(m8)
                 cc = _circle_center(m8)
-                d_rect = float(np.hypot(rc[0] - cx, rc[1] - cy)) if rc else float("nan")
-                d_circ = float(np.hypot(cc[0] - cx, cc[1] - cy)) if cc else float("nan")
+                d_rect = (float(np.hypot(rc[0] + ox - cx, rc[1] + oy - cy))
+                          if rc else float("nan"))
+                d_circ = (float(np.hypot(cc[0] + ox - cx, cc[1] + oy - cy))
+                          if cc else float("nan"))
                 rows.append(dict(
                     color=color, side=side, angle=ang, found=True,
                     d_centroid=d_centroid, d_rect=d_rect, d_circle=d_circ,
@@ -233,7 +235,7 @@ def part_b(data_dir: Path, n_images: int, out_dir: Path, seed: int = 0) -> dict:
         if bgr is None:
             continue
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        base = find_cubes(rgb)
+        base = find_cubes(rgb, diagnostics=True)
         for c in base:
             color_hits[c.color] += 1
             big_areas.append(c.area)
@@ -243,9 +245,11 @@ def part_b(data_dir: Path, n_images: int, out_dir: Path, seed: int = 0) -> dict:
 
         # 三种中心估计量的离散度
         for c in base:
-            m8 = c.extra["centroid"]
+            m8, (ox, oy) = c.extra["roi_mask"], c.extra["roi_origin"]
             rc, cc = _rect_center(m8), _circle_center(m8)
             if rc and cc:
+                rc = (rc[0] + ox, rc[1] + oy)
+                cc = (cc[0] + ox, cc[1] + oy)
                 spreads.append(max(np.hypot(c.center[0] - rc[0], c.center[1] - rc[1]),
                                    np.hypot(c.center[0] - cc[0], c.center[1] - cc[1]),
                                    np.hypot(rc[0] - cc[0], rc[1] - cc[1])))
@@ -321,6 +325,38 @@ def part_b(data_dir: Path, n_images: int, out_dir: Path, seed: int = 0) -> dict:
     return res
 
 
+def part_c_timing(files, repeats: int = 3) -> dict:
+    """单独测 CV 定位耗时（§2.1 的 CV 闭环频率预算需要真实数字）"""
+    import time
+    rgb_cache = []
+    for f in files:
+        bgr = cv2.imread(str(f))
+        if bgr is not None:
+            rgb_cache.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+    if not rgb_cache:
+        return {}
+    # 预热（首次调用有 OpenCV 内部初始化开销）
+    find_cubes(rgb_cache[0])
+    times, ncand = [], []
+    for _ in range(repeats):
+        for rgb in rgb_cache:
+            t0 = time.perf_counter()
+            cs = find_cubes(rgb)
+            times.append((time.perf_counter() - t0) * 1000.0)
+            ncand.append(len(cs))
+    t = np.array(times)
+    res = dict(n_calls=int(t.size), median_ms=float(np.median(t)),
+               p90_ms=float(np.percentile(t, 90)), max_ms=float(t.max()),
+               median_candidates=float(np.median(ncand)), image_size="640x480")
+    print("\n=== C. CV 定位单次耗时（%d 张 × %d 轮 = %d 次）==="
+          % (len(rgb_cache), repeats, t.size))
+    print("  中位 %.2f ms   p90 %.2f ms   max %.2f ms   → 单线程上限约 %.0f Hz"
+          % (res["median_ms"], res["p90_ms"], res["max_ms"],
+             1000.0 / max(1e-6, res["median_ms"])))
+    print("  每图候选数中位 %.0f" % res["median_candidates"])
+    return res
+
+
 # ---------------------------------------------------------------------------
 def main() -> int:
     ap = argparse.ArgumentParser(description="P0-b CV 精定位验收")
@@ -338,6 +374,7 @@ def main() -> int:
 
     a = {} if args.skip_synthetic else part_a(args.seed)
     b = part_b(args.data, args.images, args.out_dir, args.seed)
+    c = part_c_timing(sample_images(args.data, max(8, args.images)))
 
     print("\n" + "=" * 66)
     print("判据")
@@ -361,6 +398,14 @@ def main() -> int:
                        b["max_area"] < 5000, "max %d px" % b["max_area"]))
         checks.append(("⑦ 真实图 6 色均检出", not b["missing_colors"],
                        "缺 %s" % b["missing_colors"]))
+    if c:
+        # 真实要求来自 §2.1「CV 闭环 6~10 Hz」→ 单次 ≤100 ms 即达标。
+        # 方案 §3 另估了「2~5 ms」，实测差一个量级（见下条，仅作信息展示，
+        # 不拿估算值当合格线 —— 估算不是需求）。
+        checks.append(("⑧ CV 单次中位 ≤100 ms（10 Hz 闭环要求）",
+                       c["median_ms"] <= 100.0, "%.2f ms" % c["median_ms"]))
+        checks.append(("⑨ CV 单次是否达到方案估算的 2~5 ms（信息项）",
+                       c["median_ms"] <= 5.0, "%.2f ms（方案估 2~5 ms）" % c["median_ms"]))
     for label, ok, extra in checks:
         print("  %-34s %s   (%s)" % (label, "✓ 通过" if ok else "✗ 未通过", extra))
     all_ok = all(ok for _, ok, _ in checks)
@@ -368,7 +413,7 @@ def main() -> int:
 
     if args.json_out:
         args.json_out.write_text(json.dumps(
-            dict(synthetic=a, real=b,
+            dict(synthetic=a, real=b, timing=c,
                  checks={l: bool(o) for l, o, _ in checks}, pass_all=bool(all_ok)),
             ensure_ascii=False, indent=1, default=float), encoding="utf-8")
         print("结果已写 %s" % args.json_out)

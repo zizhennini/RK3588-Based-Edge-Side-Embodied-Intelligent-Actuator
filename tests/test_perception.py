@@ -121,7 +121,7 @@ def test_orientation_minarearect_beats_pca():
     ma, pc = [], []
     for ang in (10.0, 25.0, 40.0, 55.0, 70.0):
         img = _render((86, 250, 141), 320, 240, 45, ang)
-        c = find_cube(img, "green")
+        c = find_cube(img, "green", diagnostics=True)
         assert c is not None, ang
 
         def err(a):
