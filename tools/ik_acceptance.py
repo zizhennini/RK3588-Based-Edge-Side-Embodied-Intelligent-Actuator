@@ -157,7 +157,9 @@ def scenario_static(kin: So101Kinematics, name: str, noise_deg: float,
                max_ms=float(times.max()), med_iter=float(np.median(iters)),
                med_pos_err=float(np.median(perrs)), max_pos_err=float(max(perrs)),
                med_rot_err=float(np.median(rerrs)), max_rot_err=float(max(rerrs)),
-               max_violation_deg=float(np.degrees(worst)))
+               max_violation_deg=float(np.degrees(worst)),
+               raw=dict(times_ms=times.tolist(), iters=iters.tolist(),
+                        pos_errs=perrs.tolist(), rot_errs=rerrs.tolist()))
     print("\n=== 场景 %s ===" % name)
     print("  收敛 %d/%d = %.1f%%   限位内 %d/%d = %.1f%%"
           % (conv, n, 100.0 * conv / n, inlim, n, 100.0 * inlim / n))
@@ -197,7 +199,9 @@ def scenario_trajectory(kin: So101Kinematics, name: str, steps: int,
                max_ms=float(times.max()), med_iter=float(np.median(iters)),
                med_pos_err=float(np.median(perrs)), max_pos_err=float(max(perrs)),
                med_rot_err=float(np.median(rerrs)), max_rot_err=float(max(rerrs)),
-               max_violation_deg=float(np.degrees(worst)))
+               max_violation_deg=float(np.degrees(worst)),
+               raw=dict(times_ms=times.tolist(), iters=iters.tolist(),
+                        pos_errs=perrs.tolist(), rot_errs=rerrs.tolist()))
     print("\n=== 场景 %s ===" % name)
     print("  收敛 %d/%d = %.1f%%   限位内 %d/%d = %.1f%%"
           % (conv, n, 100.0 * conv / n, inlim, n, 100.0 * inlim / n))

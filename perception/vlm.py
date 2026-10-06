@@ -46,6 +46,17 @@ _DEFAULT_RKLLM_MODEL = "Qwen3.5-0.8B_w8a8_rk3588.rkllm"
 _TMP_IMAGE_PATH = str(_PROJECT_ROOT / "tmp" / "vlm_detect_frame.jpg")
 
 
+def flatten_prompt(prompt: str) -> str:
+    """把 prompt 压成**单行**（所有空白折叠为单个空格）
+
+    RKLLM demo 是逐行 ``fgets`` 读 stdin 的，prompt 里的每个换行都会被当成
+    **一次独立提问**。实测一个 4 行的 prompt 会产生 4 轮 user/robot 往返：
+    图像 token 只留在第 1 轮，后续轮次模型看不到图（回"你没提供图片"），
+    最终解析到的是最后一轮的无关输出 —— 即"不报错但结果全错"。
+    """
+    return " ".join(prompt.split())
+
+
 class VLMPerception(PerceptionModule):
     """Qwen3.5 VLM 目标检测 -- 子进程调用 RKLLM demo
 
@@ -87,7 +98,10 @@ class VLMPerception(PerceptionModule):
 
         # 推理参数
         self._max_new_tokens: int = 512
-        self._max_context_len: int = 2048
+        # 板端实测（2026-10）：Qwen3.5-0.8B 的 rkllm 上下文长度必须 ≥4096，
+        # 否则进程直接 `rkllm init failed`，且**不打印原因**，极难定位。
+        # 原默认值 2048 在这台板上必定初始化失败。
+        self._max_context_len: int = 4096
         self._n_threads: int = 3
         self._platform: str = "rk3588"
         self._timeout: float = 120.0
@@ -137,6 +151,11 @@ class VLMPerception(PerceptionModule):
         self._image_height = config.get("image_height", self._image_height)
         self._timeout = config.get("timeout", self._timeout)
         self._max_new_tokens = config.get("max_new_tokens", self._max_new_tokens)
+        # 以下三项原来没从 config 读取 → 调用方传了也被静默忽略（含必须为 4096 的
+        # max_context_len，见 __init__ 注释），是「配置改了没生效」类问题的根源
+        self._max_context_len = config.get("max_context_len", self._max_context_len)
+        self._n_threads = config.get("n_threads", self._n_threads)
+        self._platform = config.get("platform", self._platform)
 
         # 检查 demo 二进制是否存在
         demo_path = self._get_demo_path()
@@ -243,10 +262,15 @@ class VLMPerception(PerceptionModule):
     # ─── 内部方法 ─────────────────────────────────────────────────────────────
 
     def _get_demo_path(self) -> str:
-        """获取 demo 二进制的完整路径"""
+        """获取 demo 二进制的完整路径（**始终绝对**）
+
+        _run_inference 用 ``cwd=model_dir`` 启动子进程，而子进程的相对可执行路径
+        是按**新 cwd** 解析的；若这里返回相对路径，就会去找
+        ``<model_dir>/<model_dir>/demo`` 而报 FileNotFoundError。
+        """
         if os.path.isabs(self._demo_bin):
-            return self._demo_bin
-        return str(Path(self._model_dir) / self._demo_bin)
+            return os.path.abspath(self._demo_bin)
+        return str((Path(self._model_dir) / self._demo_bin).resolve())
 
     def _save_frame(self, rgb: np.ndarray) -> str:
         """将 RGB numpy 数组保存为临时 BGR JPEG 文件
@@ -332,9 +356,13 @@ class VLMPerception(PerceptionModule):
         ]
 
         # prompt 通过 stdin 传入，以 "exit" 结束会话
-        stdin_text = prompt + "\nexit\n"
+        #
+        # ⚠️ 必须压成**单行**，原因见 flatten_prompt() 的说明：
+        # demo 逐行读 stdin，多行 prompt 会变成多次独立提问。
+        flat_prompt = flatten_prompt(prompt)
+        stdin_text = flat_prompt + "\nexit\n"
 
-        logger.debug(f"VLM 推理命令: {' '.join(cmd[:4])}...")
+        logger.debug(f"VLM 推理命令: {' '.join(cmd[:4])}... | prompt: {flat_prompt[:80]}")
 
         result = subprocess.run(
             cmd,

@@ -5,6 +5,7 @@
 | `test_feetech_bus.py` | `hardware/feetech_bus.py`: sign-magnitude 编解码、STS3215 控制表回归、EPROM 可写集合、目标突变限幅、raw↔rad 换算、无 SDK 时优雅失败 | 14 用例（仅依赖 numpy，PC/板端均可跑） |
 | `test_episode_quality.py` | `tools/episode_quality.py`: 采集质量判据（帧率/丢帧/追踪误差/时长四道门槛、无效帧统计、数据集汇总、报告渲染） | 10 用例（纯逻辑，无硬件无 numpy） |
 | `test_so101_kinematics.py` | `hardware/so101_kinematics.py`: 标定限位换算与结构不变式、URDF 限位注入（恰好 6 个、不污染 transmission）、mesh 剥离、运动链完整、TCP frame 正确；placo 用例含 q 布局、FK/IK 往返、**关节零点约定 vs 真实数据集** | 11 用例（8 个纯逻辑 PC 可跑；3 个需 placo，缺库自动 SKIP） |
+| `test_perception.py` | `perception/cube_locator.py` 与 `perception/vlm.py`: 45° 方块不失检、拟合矩形填充率与旋转无关、机械臂样淡蓝白大块剔除、质心精度、**朝向必须用 minAreaRect（PCA 对正方形退化）**、6 色归类、色相窗口不重叠、SoM 绘制、**多行 prompt 必须压成单行** | 14 用例（依赖 opencv+numpy，PC/板端均可跑） |
 | `test_kinematics.py` | `policy/kinematics.py`（**旧解析 IK，待废弃**）: FK/IK 互逆往返、工作空间钳制、关节限位 | 6 用例（仅依赖 numpy） |
 | `test_vlm.py` | VLM 框架接口: 模拟引擎 + 结果解析 | 需 VLM 环境（板端） |
 
@@ -28,7 +29,10 @@
 | 位置 | 内容 |
 |------|------|
 | `runtime/shared_frame.py` | SharedFrameBuffer 共享内存帧缓冲往返自检（seqlock / numpy 视图 / 数据完整性），仅依赖 numpy |
-| `tools/ik_acceptance.py` | P0-2 离线 IK 数值验收（多场景 + 工作空间 + 关节零点约定），需 placo |
+| `tools/ik_acceptance.py` | P0-c 离线 IK 数值验收（多场景 + 工作空间 + 关节零点约定），需 placo |
+| `tools/cv_localization_bench.py` | P0-b CV 精定位验收（合成图精确真值 + 真实图鲁棒性），需 opencv |
+| `tools/vlm_bench.py` | P0-a VLM 定位验收（直接问坐标 vs Set-of-Mark 选编号），需板端 NPU |
+| `tools/p0_plots.py` | 由上三个基准的 JSON 生成 P0 三张分布图（需 matplotlib） |
 
 ## 运行
 
@@ -36,9 +40,12 @@
 python tests/test_feetech_bus.py        # 总线协议层（无需硬件）
 python tests/test_episode_quality.py    # 采集质量判据
 python tests/test_so101_kinematics.py   # 运动学（placo 用例缺库自动 SKIP）
+python tests/test_perception.py         # 立方体定位 + VLM prompt 处理
 python tests/test_kinematics.py         # 旧解析 IK（待废弃）
 python tests/test_vlm.py                # VLM 接口（板端）
 python tools/ik_acceptance.py           # IK 数值验收（板端，需 placo）
+python tools/cv_localization_bench.py   # CV 精定位验收（PC/板端）
+python tools/vlm_bench.py               # VLM 定位验收（板端，需 NPU）
 python runtime/shared_frame.py          # 共享内存帧缓冲自检
 ```
 

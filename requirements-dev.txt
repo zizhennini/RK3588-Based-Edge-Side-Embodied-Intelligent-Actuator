@@ -31,3 +31,7 @@ numpy>=1.24
 scipy>=1.10
 tqdm
 safetensors>=0.4          # tools/export_act_onnx.py 加载 LeRobot checkpoint 所需
+
+# P0 报告分布图（tools/p0_plots.py）。板端不需要；matplotlib 默认字体无中文字形，
+# 故图上标签一律用 ASCII。
+matplotlib>=3.7
