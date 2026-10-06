@@ -128,6 +128,189 @@ def cube_xy_from_pixel(H, px, z_cube: float, z_plane: float, parallax=None):
 
 
 # ---------------------------------------------------------------------------
+# 夹爪
+# ---------------------------------------------------------------------------
+def gripper_load(arm):
+    """读夹爪负载（%）与电流（mA）"""
+    try:
+        d = arm.bus.read_diagnostics([6]).get(6, {})
+        ld = d.get("load")
+        return (ld[0] if ld else 0.0), (d.get("current_mA") or 0.0)
+    except Exception:
+        return 0.0, 0.0
+
+
+def gripper_open_counts(arm):
+    """夹爪当前开度（相对闭合限位的编码器计数）。**判「夹到东西」最可靠的量**：
+    两指之间没有东西时，闭到底会到 range_min 附近；夹住 2 cm 方块时两指被撑开，
+    编码器会停在一个明显更大的值上 —— 与米制宽度映射是否准确无关。"""
+    try:
+        cal = arm.calibration["6"]
+        raw = arm._rad_to_raw(6, arm.read_positions()[5])
+        return int(raw) - int(cal["range_min"])
+    except Exception:
+        return -1
+
+
+def close_until_grasp(arm, contact_load=GRASP_LOAD, w_start=0.055, w_min=0.003,
+                      step=0.004, settle=0.55, backoff=0.003,
+                      min_open_counts=90):
+    """逐步闭合直到夹到东西，随后**回退一点**避免持续堵转。
+
+    判据用**两个独立量的与**：
+      ① 负载上升（有阻力）
+      ② 编码器开度仍明显大于闭合限位（两指被撑开）——这一条能排除
+         「两指之间没东西、闭到底把负载顶上去」的假抓取
+    必需回退：实测不回退会让夹爪在 21.6% 负载 / 143 mA 下堵转约 3 分钟，
+    温度 37→45℃，舵机锁死 Overload 保护态（寻址 ping 不应答，只能断电恢复）。
+
+    Returns: (grasped, load_pct, w_used, open_counts)
+    """
+    w = w_start
+    while w >= w_min:
+        arm.gripper_width(w)
+        time.sleep(settle)
+        load, _ = gripper_load(arm)
+        oc = gripper_open_counts(arm)
+        if load >= contact_load and oc >= min_open_counts:
+            if backoff > 0:
+                raw = arm._rad_to_raw(6, arm.read_positions()[5])
+                arm.bus.write("Goal_Position", 6, min(2919, raw + 55))
+                time.sleep(0.4)
+            return True, gripper_load(arm)[0], w, gripper_open_counts(arm)
+        w -= step
+    return False, gripper_load(arm)[0], w, gripper_open_counts(arm)
+
+
+def open_gripper(arm, w=0.055, settle=0.8):
+    arm.gripper_width(w)
+    time.sleep(settle)
+
+
+# ---------------------------------------------------------------------------
+def run_trial(kin, dik, arm, cam, cal, args, rng, idx):
+    """一次完整抓放。返回分段结果 dict（Reached / Grasped / Placed）"""
+    H = np.asarray(cal["H"], float)
+    drift = cal.get("drift_model")
+    z_plane = float(cal["z_m"])
+    ref_area = None
+    for p in cal.get("points", []):
+        mk = p.get("marker") or {}
+        if mk.get("area"):
+            ref_area = float(mk["area"])
+            break
+
+    rgb, cands = detect_cubes(cam, args.colors)
+    if not cands:
+        return dict(idx=idx, ok=False, reason="no_cube")
+    # 只抓「映射后落标定区域内」的方块。区域外单应与静差模型都在**外推**：
+    # 实测紫色方块在区域边界外(y=-0.163，区域下界 -0.16) → Reached 偏 17.1 mm 抓空；
+    # 而区域内的蓝色方块只偏 4.3 mm。所以宁可不抓，也不要拿外推结果去撞。
+    x0, x1, y0, y1 = cal["region"]
+    m = args.in_region_margin
+    inside, outside = [], []
+    for c in cands:
+        xy = apply_h(H, np.asarray(c.center, float).reshape(1, 2))[0]
+        if (x0 + m) <= xy[0] <= (x1 - m) and (y0 + m) <= xy[1] <= (y1 - m):
+            inside.append((c, xy))
+        else:
+            outside.append((c, xy))
+    if outside and args.verbose:
+        print("  区域外（跳过）: " + ", ".join(
+            "%s(%+.3f,%+.3f)" % (COLOR_ZH.get(c.color, "?"), xy[0], xy[1])
+            for c, xy in outside[:6]))
+    if not inside:
+        return dict(idx=idx, ok=False, reason="no_cube_in_region",
+                    outside=[(c.color, list(map(float, xy))) for c, xy in outside])
+    tgt = pick_target([c for c, _ in inside], args.target, rng, args.drop)
+    x_plane = next(xy for c, xy in inside if c is tgt)
+    x_cube = cube_xy_from_pixel(H, tgt.center, CUBE_H_M / 2, z_plane, args.parallax)
+    ddx, ddy = apply_drift(drift, x_cube[0], x_cube[1]) if drift else (0.0, 0.0)
+    cmd_xy = (x_cube[0] - ddx, x_cube[1] - ddy)
+    z_grasp = args.grasp_z if args.grasp_z is not None else GRASP_Z
+
+    rec = dict(idx=idx, color=tgt.color, pix=list(map(float, tgt.center)),
+               xy_plane=list(map(float, x_plane)), xy_cube=list(map(float, x_cube)),
+               cmd=list(map(float, cmd_xy)), z_grasp=float(z_grasp),
+               drift_mm=[ddx * 1000, ddy * 1000], reached=False, grasped=False,
+               placed=False, reason="")
+
+    # 1) 下降到抓取高度
+    ok, why = goto_lift(dik, arm, (cmd_xy[0], cmd_xy[1], z_grasp), z_safe=Z_SAFE)
+    if not ok:
+        rec["reason"] = "move_fail: %s" % why
+        return rec
+    time.sleep(0.4)
+
+    # 2) 量 Reached：标记像素 ↔ 移动前方块像素（同一单应）
+    px_pred = apply_h(np.linalg.inv(H), np.array(cmd_xy).reshape(1, 2))[0]
+    mk, spread, info = stable_marker(cam, cal.get("marker_kind", "panel"),
+                                     cal.get("marker_color"), expect_px=px_pred,
+                                     ref_area=ref_area, max_jump_px=args.track_gate_px)
+    if mk is None:
+        rec["reason"] = "marker_lost_after_move"
+        return rec
+    tip = apply_h(H, mk.reshape(1, 2))[0]
+    cub = apply_h(H, np.asarray(tgt.center, float).reshape(1, 2))[0]
+    rec["reach_mm"] = float(np.hypot(tip[0] - cub[0], tip[1] - cub[1]) * 1000)
+    rec["reached"] = rec["reach_mm"] <= args.reach_tol_mm
+
+    # 3) 闭合夹爪抓取（判据 = 负载上升 **且** 编码器开度被撑开，排除"闭到底"假抓取）
+    grasped, load, w_used, oc = close_until_grasp(arm, args.grasp_load)
+    rec["close_w"] = float(w_used)
+    rec["close_load"] = float(load)
+    rec["close_open_counts"] = int(oc)
+
+    # 4) 抬起，再读负载：夹住的话负载会保持；掉出去则回落到 ~0
+    ok2, why2 = goto_lift(dik, arm, (cmd_xy[0], cmd_xy[1], LIFT_Z), z_safe=Z_SAFE)
+    if not ok2:
+        rec["reason"] = "lift_fail: %s" % why2
+        open_gripper(arm)
+        return rec
+    time.sleep(0.5)
+    load_after, _ = gripper_load(arm)
+    rec["load_after_lift"] = float(load_after)
+    rec["grasped"] = bool(grasped and load_after >= args.hold_load)
+
+    # 5) 搬到投放区
+    if rec["grasped"]:
+        ok3, why3 = goto_lift(dik, arm, (args.drop[0], args.drop[1], LIFT_Z), z_safe=Z_SAFE)
+        if not ok3:
+            rec["reason"] = "carry_fail: %s" % why3
+            open_gripper(arm)
+            return rec
+        ok4, why4 = goto_lift(dik, arm, (args.drop[0], args.drop[1], args.drop_z), z_safe=Z_SAFE)
+        if not ok4:
+            rec["reason"] = "drop_fail: %s" % why4
+            open_gripper(arm)
+            return rec
+        open_gripper(arm)
+        time.sleep(0.4)
+        goto_lift(dik, arm, (args.drop[0], args.drop[1], LIFT_Z), z_safe=Z_SAFE)
+        # 6) 判 Placed：投放区附近出现该颜色的方块
+        rgb2, cands2 = detect_cubes(cam, args.colors)
+        best = None
+        for c in cands2:
+            if c.color != tgt.color:
+                continue
+            xy = apply_h(H, np.asarray(c.center, float).reshape(1, 2))[0]
+            d = float(np.hypot(xy[0] - args.drop[0], xy[1] - args.drop[1]))
+            if best is None or d < best[0]:
+                best = (d, c)
+        if best is None:
+            rec["reason"] = "cube_not_found_after_drop"
+        else:
+            rec["place_mm"] = best[0] * 1000
+            rec["placed"] = best[0] <= args.place_tol_mm
+            if not rec["placed"]:
+                rec["reason"] = "placed_too_far(%.0fmm)" % (best[0] * 1000)
+    else:
+        rec["reason"] = rec["reason"] or "not_grasped(load %.1f%%)" % load_after
+        open_gripper(arm)
+    return rec
+
+
+# ---------------------------------------------------------------------------
 def cmd_scene(kin, args) -> int:
     cam = Cam()
     try:
@@ -145,6 +328,108 @@ def cmd_scene(kin, args) -> int:
         return 0 if cands else 2
     finally:
         cam.close()
+
+
+def _setup(kin, args):
+    """连从臂 + 开相机 + 建 DownIK（calibrate/approach/single/trials 共用）"""
+    cal = load_calib(args.homography, kin)
+    from tools.handeye_calib import _connect
+    arm, T_now = _connect(kin, Args(args.port, args.calib, args.i_term, args.release))
+    dik = make_dik(kin, _xref_from(T_now))
+    cam = Cam()
+    return cal, arm, dik, cam
+
+
+def _teardown(arm, cam, args):
+    cam.close()
+    try:
+        if args.release:
+            arm.disconnect()
+            print("从臂已断开（扭矩已释放）")
+        else:
+            arm.bus.disconnect(disable_torque=False)
+            print("从臂串口已关闭（**扭矩保持**）")
+    except Exception:
+        pass
+
+
+def _print_rec(rec):
+    print("  [%2d] %-4s Reached=%s(%.1f mm) Grasped=%s(load %.1f%%) Placed=%s  %s"
+          % (rec["idx"], COLOR_ZH.get(rec.get("color"), "-"),
+             "✓" if rec.get("reached") else "✗", rec.get("reach_mm", float("nan")),
+             "✓" if rec.get("grasped") else "✗", rec.get("load_after_lift", float("nan")),
+             "✓" if rec.get("placed") else "✗", rec.get("reason", "")))
+
+
+def cmd_single(kin, args) -> int:
+    if not args.confirm_motion:
+        print("✗ 会驱动机器人，加 --confirm-motion")
+        return 2
+    cal, arm, dik, cam = _setup(kin, args)
+    try:
+        if not args.no_recover:
+            pass   # 由调用方先跑 --recover；这里不自动动
+        rec = run_trial(kin, dik, arm, cam, cal, args,
+                        np.random.default_rng(args.seed), 1)
+        print("\n=== 单次抓放结果 ===")
+        _print_rec(rec)
+        print("  目标方块像素 %s → 基座 %s（视差修正后 %s）"
+              % (np.round(rec["pix"], 0).tolist(),
+                 np.round(rec["xy_plane"], 4).tolist(),
+                 np.round(rec["xy_cube"], 4).tolist()))
+        print("  静差补偿 %s mm → 下发 %s"
+              % (np.round(rec["drift_mm"], 2).tolist(),
+                 np.round(rec["cmd"], 4).tolist()))
+        if args.json_out:
+            args.json_out.write_text(json.dumps(rec, ensure_ascii=False, indent=1),
+                                     encoding="utf-8")
+            print("  已写 %s" % args.json_out)
+        return 0 if (rec["grasped"] and rec["placed"]) else 2
+    finally:
+        _teardown(arm, cam, args)
+
+
+def cmd_trials(kin, args) -> int:
+    if not args.confirm_motion:
+        print("✗ 会驱动机器人，加 --confirm-motion")
+        return 2
+    n = args.trials
+    cal, arm, dik, cam = _setup(kin, args)
+    recs = []
+    try:
+        print("\n>>> 正式协议：%d 试次（交错执行，不重置场景；分段计 Reached/Grasped/Placed）"
+              % n)
+        for i in range(1, n + 1):
+            rec = run_trial(kin, dik, arm, cam, cal, args,
+                            np.random.default_rng(args.seed + i), i)
+            recs.append(rec)
+            _print_rec(rec)
+            # 每轮把抓起/未抓起的方块位置变化记录下来，便于复盘
+        ok_r = [r for r in recs if r.get("reached")]
+        ok_g = [r for r in recs if r.get("grasped")]
+        ok_p = [r for r in recs if r.get("placed")]
+        print("\n=== P2 分段成功率（%d 试次）===" % n)
+        for tag, arr in (("Reached(±%.0fmm)" % args.reach_tol_mm, ok_r),
+                         ("Grasped", ok_g), ("Placed", ok_p)):
+            p = len(arr) / n
+            se = (p * (1 - p) / n) ** 0.5
+            print("  %-18s %2d/%d = %5.1f%%   （95%% CI ±%.1f pp）"
+                  % (tag, len(arr), n, 100 * p, 196 * se))
+        from collections import Counter
+        fails = Counter(r.get("reason", "?") for r in recs if not r.get("placed"))
+        if fails:
+            print("\n  失败模式分类:")
+            for k, v in fails.most_common():
+                print("    %-34s %d 次" % (k, v))
+        if args.json_out:
+            args.json_out.write_text(json.dumps(
+                dict(n=n, recs=recs, reached=len(ok_r), grasped=len(ok_g),
+                     placed=len(ok_p), cfg=vars(args)), ensure_ascii=False,
+                indent=1, default=str), encoding="utf-8")
+            print("  已写 %s" % args.json_out)
+        return 0 if len(ok_p) / n >= 0.7 else 2
+    finally:
+        _teardown(arm, cam, args)
 
 
 def cmd_approach(kin, args) -> int:
@@ -191,17 +476,10 @@ def cmd_approach(kin, args) -> int:
             return 2
         time.sleep(0.5)
 
-        # 到了之后再看一眼：方块还在原像素附近吗？手指（标记）离方块多远？
-        rgb2, cands2 = detect_cubes(cam, args.colors)
-        same = None
-        for c in cands2:
-            if c.color == tgt.color and np.hypot(c.center[0] - tgt.center[0],
-                                                c.center[1] - tgt.center[1]) < 60:
-                same = c
-                break
-        if same is None:
-            print("⚠ 下降后方块不在原位（可能被手指挡住或被碰走）→ 无法量偏差")
-        # 标记的参考面积与预测像素：优先用标定时记录的实际值，避免跟踪误锁
+        # 到位后只看**标记**：方块此时被夹爪压在下面、俯视相机根本看不到它
+        #（实测：悬停到方块上方后，方块直接从检测结果里消失）。
+        # 所以拿"移动前记录的方块像素"与"移动后的标记像素"都用同一条单应换算 ——
+        # 这正是流水线实际会犯的误差（流水线也是用 H 从像素算方块坐标），量它才有意义。
         ref_area = args.ref_area
         if ref_area is None:
             for p in cal.get("points", []):
@@ -210,26 +488,27 @@ def cmd_approach(kin, args) -> int:
                     ref_area = float(mk["area"])
                     break
         px_pred = apply_h(np.linalg.inv(H), np.array(cmd_xy).reshape(1, 2))[0]
-        expect_marker, _, info = stable_marker(cam, cal.get("marker_kind", "panel"),
-                                               cal.get("marker_color"),
-                                               expect_px=px_pred,
-                                               ref_area=ref_area,
-                                               max_jump_px=args.track_gate_px)
+        marker_px, spread, info = stable_marker(
+            cam, cal.get("marker_kind", "panel"), cal.get("marker_color"),
+            expect_px=px_pred, ref_area=ref_area, max_jump_px=args.track_gate_px)
         print("\n=== 接近结果 ===")
-        if same is not None and expect_marker is not None:
-            # 把两者的像素都换算到基座系比较（用同一条单应，故视差被抵消一半，
-            # 这里主要看"手指相对方块"的横向偏差）
-            tip = apply_h(H, expect_marker.reshape(1, 2))[0]
-            cub = apply_h(H, same.center.reshape(1, 2))[0]
-            off = np.hypot(tip[0] - cub[0], tip[1] - cub[1]) * 1000
-            print("  手指(标记) 像素 (%3.0f,%3.0f)" % tuple(expect_marker))
-            print("  方块      像素 (%3.0f,%3.0f)" % tuple(same.center))
-            print("  → 横向偏差 **%.2f mm**（应小于夹爪可容差；方块 2 cm，经验容差 ~±8 mm）"
-                  % off)
-            print("  判定: %s" % ("✅ 可以试抓" if off <= 8.0 else "❌ 偏太多，先查视差/静差"))
-            return 0 if off <= 8.0 else 2
-        print("  未能量化偏差（见上面告警）")
-        return 2
+        if marker_px is None:
+            print("  ✗ 到位后看不到标记（类型 %s）%s" % (cal.get("marker_kind"), info or ""))
+            return 2
+        tip = apply_h(H, marker_px.reshape(1, 2))[0]
+        cub = apply_h(H, np.asarray(tgt.center, float).reshape(1, 2))[0]
+        off = float(np.hypot(tip[0] - cub[0], tip[1] - cub[1]) * 1000)
+        print("  移动前 方块像素 (%3.0f,%3.0f) → 基座 (%+.4f, %+.4f)"
+              % (tgt.center[0], tgt.center[1], cub[0], cub[1]))
+        print("  移动后 标记像素 (%3.0f,%3.0f) → 基座 (%+.4f, %+.4f)  抖动 %.2f px"
+              % (marker_px[0], marker_px[1], tip[0], tip[1], spread))
+        print("  → 手指相对方块的横向偏差 **%.2f mm**" % off)
+        print("     （含视差：单应在标记平面 z=%.3f 标定，而方块在 z≈%.3f 平面）"
+              % (z_plane, CUBE_H_M / 2))
+        tol = args.grasp_tol_mm
+        print("  判定: %s（阈值 %.1f mm；2 cm 方块的经验容差 ~±8 mm）"
+              % ("✅ 可以试抓" if off <= tol else "❌ 偏太多，先修视差", tol))
+        return 0 if off <= tol else 2
     finally:
         cam.close()
         try:
@@ -265,6 +544,24 @@ def main() -> int:
                          '"origin_xy":[0.2,0.0],"k_per_m":2.0}\'')
     ap.add_argument("--ref-area", type=float, default=None, help="标记参考面积（跟踪用）")
     ap.add_argument("--track-gate-px", type=float, default=45.0)
+    ap.add_argument("--grasp-tol-mm", type=float, default=8.0,
+                    help="判定「可以试抓」的横向偏差阈值（默认 8 mm）")
+    ap.add_argument("--grasp-load", type=float, default=GRASP_LOAD,
+                    help="判「夹到东西」的夹爪负载阈值（%%）")
+    ap.add_argument("--hold-load", type=float, default=6.0,
+                    help="抬起后仍算「夹住」的负载阈值（%%）；掉出去会回落到 ~0")
+    ap.add_argument("--reach-tol-mm", type=float, default=10.0,
+                    help="Reached 判据：末端到达抓取点 ±该值（默认 10 mm）")
+    ap.add_argument("--place-tol-mm", type=float, default=50.0,
+                    help="Placed 判据：投放后方块落在投放点 ±该值（默认 50 mm）")
+    ap.add_argument("--drop-z", type=float, default=0.045,
+                    help="投放时下降到的高度（米）")
+    ap.add_argument("--no-recover", action="store_true",
+                    help="不预先做姿态恢复（默认也不自动做，需先手动跑 --recover）")
+    ap.add_argument("--in-region-margin", type=float, default=0.008,
+                    help="只抓映射后落标定区域【内缩该值】的方块（默认 8 mm），"
+                         "区域外是外推、实测会偏十几毫米")
+    ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--confirm-motion", action="store_true")
     ap.add_argument("--snap", type=Path, default=None)
     ap.add_argument("--seed", type=int, default=0)
@@ -279,7 +576,10 @@ def main() -> int:
         return cmd_scene(kin, args)
     if args.approach_only:
         return cmd_approach(kin, args)
-    print("（--single / --trials 尚未实现，先用 --approach-only 量化误差）")
+    if args.single:
+        return cmd_single(kin, args)
+    if args.trials:
+        return cmd_trials(kin, args)
     return 2
 
 
