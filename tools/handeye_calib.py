@@ -1107,16 +1107,19 @@ def cmd_calibrate(kin, args) -> int:
     print("  渐近到区域中心 ✓")
     r = feasibility_sweep(dik, q_center, pts)
     _print_feasibility(r)
-    if r["n_ok"] != r["n"]:
-        print("\n✗ 有 %d 个点不可达。未驱动任何舵机。" % (r["n"] - r["n_ok"]))
+    ratio = r["n_ok"] / max(1, r["n"])
+    if ratio < args.min_ok_ratio:
+        print("\n✗ 可达率 %.0f%% 低于阈值 %.0f%%。未驱动任何舵机。"
+              % (100 * ratio, 100 * args.min_ok_ratio))
         print("  处理：① 按上面提示缩小 --region；② 或把从臂摆到更接近区域中心的姿态"
-              "（夹爪朝下）后重试；③ 或加 --force 跳过预检（不推荐）")
+              "（夹爪朝下）后重试；③ 或放宽 --min-ok-ratio")
         if not args.force:
             arm.disconnect()
             return 2
         print("  --force 已指定，继续。")
     else:
-        print("  ✅ 预检通过")
+        print("  ✅ 预检通过（可达率 %.0f%%，不可达的点会被跳过，拟合至少需要 4 个点）"
+              % (100 * ratio))
 
     cam = Cam()
     try:
@@ -1485,6 +1488,9 @@ def main() -> int:
                     help="确认现场安全、允许驱动机器人（--calibrate/--verify 必需）")
     ap.add_argument("--force", action="store_true",
                     help="跳过上机前可行性预检（不推荐，仅在明确知道风险时用）")
+    ap.add_argument("--min-ok-ratio", type=float, default=0.8,
+                    help="预检允许的不可达比例上限（默认 0.8=80%% 可达即放行，"
+                         "不可达点会被跳过；角落常因数值擦边差 10%% 而误报不可达）")
     args = ap.parse_args()
 
     t0 = time.time()
