@@ -580,6 +580,32 @@ class FeetechBus:
     # ------------------------------------------------------------------
     # 扭矩管理
     # ------------------------------------------------------------------
+    def set_operating_mode(self, mode: int,
+                           motor_ids: Optional[Sequence[int]] = None) -> None:
+        """切换工作模式（MODE_POSITION=0 / MODE_VELOCITY=1 / MODE_PWM=2 / MODE_STEP=3）
+
+        协议约束（Feetech STS 系列内存表）：
+          - Operating_Mode(33) 位于 EEPROM 区（0-54），写入需要 Lock=0；
+          - 切模式前必须 Torque_Enable=0（官方 SCServo SDK 行为）。
+        本方法内部完成 disable_torque（含 Lock=0），调用方负责切回后按需
+        enable_torque / 恢复 MODE_POSITION。
+        """
+        ids = list(motor_ids) if motor_ids else list(self.motor_ids)
+        self.disable_torque(ids)          # Torque=0 + Lock=0
+        for mid in ids:
+            self.write("Operating_Mode", mid, mode, num_retry=1)
+
+    def write_goal_pwm(self, pwm: Dict[int, int],
+                       motor_ids: Optional[Sequence[int]] = None) -> None:
+        """PWM 模式下写 Goal_PWM（占空比 -1000~+1000，即 ±100%）。
+
+        协议：SMS/STS 系列 MODE_PWM=2 时，48 号寄存器（位置模式下为
+        Torque_Limit）复用为 Goal_PWM——与官方 SCServo SDK WritePwm 同地址。
+        """
+        if not pwm:
+            return
+        self.sync_write("Torque_Limit", pwm, num_retry=1)
+
     def enable_torque(self, motor_ids: Optional[Sequence[int]] = None) -> None:
         """恢复扭矩（防突跳：先把 Goal_Position 对齐当前 Present_Position）
 

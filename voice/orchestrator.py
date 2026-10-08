@@ -97,7 +97,11 @@ class VoiceAssistant:
             from vla.command_queue import MotionMatcher
             matcher = MotionMatcher()
             action_name, info = matcher.match(text)
-            if action_name and info.get("file"):
+            # 序列连接词检测:含"然后/再/接着/之后/最后"的指令是多步任务,
+            # 不能被单步关键词匹配截胡(否则"先打招呼,然后抬起"只执行"抬起")
+            _SEQ_WORDS = ("然后", "再", "接着", "之后", "最后")
+            multi_step = any(w in text for w in _SEQ_WORDS)
+            if action_name and info.get("file") and not multi_step:
                 print(f"[动作] 匹配到: {action_name}")
                 if speak and play:
                     tts = self.config["models"]["tts"]
@@ -107,6 +111,47 @@ class VoiceAssistant:
                     p.close()
                 self.motion_cb(action_name, info)
                 return f"执行动作: {action_name}"
+            # 多步编排(vlm_arm 函数清单模式):单步未命中时,把指令拆解为
+            # 动作库动作序列;解析失败/无动作则落回下方问答路径。
+            # 执行用同步 subprocess(replay_traj 完成才走下一步)——
+            # 不能用 motion_cb 的后台 Popen:多个回放并发会争抢同一条舵机总线
+            from .agent_plan import plan_from_text
+            actions, response = plan_from_text(self.config, text)
+            if actions:
+                import subprocess
+                from pathlib import Path as _P
+                _root = _P(__file__).resolve().parent.parent
+                actions_index = matcher._index
+                if speak and play:
+                    from .streaming_tts import StreamingTtsPlayer as STP
+                    p = STP(self.config)
+                    if response:
+                        p.enqueue(response)
+                    for i, act in enumerate(actions, 1):
+                        p.enqueue(f"第{i}步,{act}")
+                    p.close()
+                for i, act in enumerate(actions, 1):
+                    traj_rel = actions_index.get(act, {}).get("file", "")
+                    print(f"[编排] 执行第 {i}/{len(actions)} 步: {act}", flush=True)
+                    if not traj_rel:
+                        print(f"[编排] 动作 {act} 暂无轨迹文件,跳过", flush=True)
+                        continue
+                    traj = _root / "motion_library" / traj_rel
+                    if not traj.is_file():
+                        print(f"[编排] 轨迹不存在: {traj}", flush=True)
+                        continue
+                    try:
+                        subprocess.run(
+                            [sys.executable, str(_root / "scripts" / "replay_traj.py"),
+                             str(traj), "--port", "/dev/ttyACM0", "--fps", "30",
+                             "--initial"],
+                            cwd=str(_root), check=True,
+                        )
+                    except subprocess.CalledProcessError as exc:
+                        print(f"[编排] 动作 {act} 回放失败(ret={exc.returncode}),终止序列",
+                              flush=True)
+                        break
+                return f"执行动作序列: {' → '.join(actions)}"
         from .streaming_tts import StreamingTtsPlayer
         if speak and play:
             print("将使用流式 TTS：Qwen 每生成一句就直接写入喇叭 PCM 播放。", flush=True)

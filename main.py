@@ -364,6 +364,36 @@ class System:
             if self.voice:
                 self.voice.say("我还在思考中")
 
+        elif intent == "play_motion":
+            # 动作库回放(演示动作,来自 LLM 意图编排)
+            name = params.get("name", "")
+            try:
+                from vla.command_queue import MotionMatcher
+                from pathlib import Path
+                import subprocess
+                matcher = MotionMatcher()
+                info = matcher._index.get(name, {})
+                traj_rel = info.get("file", "")
+                traj = Path("motion_library") / traj_rel if traj_rel else None
+                if traj and traj.is_file():
+                    if self.voice:
+                        self.voice.say(f"执行{name}")
+                    subprocess.run(
+                        [sys.executable, str(Path("scripts") / "replay_traj.py"),
+                         str(traj), "--port", "/dev/ttyACM0", "--fps", "30",
+                         "--initial"],
+                        cwd=".", check=True)
+                else:
+                    if self.voice:
+                        self.voice.say(f"{name}还没有录制动作")
+            except Exception as e:
+                logger.error(f"动作回放失败: {e}")
+                if self.voice:
+                    self.voice.say("动作回放失败")
+
+        elif intent == "handled":
+            pass  # LLM 编排分支已在 _route 内逐个回调完成
+
         else:
             logger.warning(f"未知语音意图: {intent}")
 

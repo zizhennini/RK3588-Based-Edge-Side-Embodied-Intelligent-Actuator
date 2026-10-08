@@ -12,11 +12,12 @@ import json
 import logging
 import numpy as np
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
 
 from hardware.interfaces import HardwareModule, Observation
 from hardware.feetech_bus import (FeetechBus, GRIPPER_MOTOR_ID, angle_zero,
-                                  rad_to_raw, raw_to_rad)
+                                  rad_to_raw, raw_to_rad,
+                                  MODE_POSITION, MODE_PWM)
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,19 @@ class SO101Arm(HardwareModule):
         # 状态
         self._last_cmd_angles: Optional[np.ndarray] = None
         self._connected = False
+        # 扭矩/使能状态跟踪（修复"回零后仍使能"bug 的配套状态）
+        self._torque_on = False          # connect() 后置 True
+        self._gravity_hold_on = False    # 重力补偿保持模式（PWM 开环前馈）
+
+        # 重力补偿开关（任务 2）：默认关闭，保持历史行为；
+        # 开启后 home() 到位进入 PWM 重力补偿保持而非纯失能
+        try:
+            from config import settings as _s
+            self.gravity_comp_enabled = bool(getattr(_s, "GRAVITY_COMP_ENABLED", False))
+            self._gravity_pwm_map = dict(getattr(_s, "GRAVITY_COMP_PWM_MAP", {}) or {})
+        except Exception:
+            self.gravity_comp_enabled = False
+            self._gravity_pwm_map = {}
 
         # G3: execute() 帧间突变限幅（度/帧）。None=关闭（默认，保持历史行为）；
         # 策略流（ACT 30Hz）建议 15~30，遥操作跟随由 teleop 层自行限幅。
@@ -221,6 +235,7 @@ class SO101Arm(HardwareModule):
         # Return_Delay=0、Acceleration=16（修复原地址对调 Bug，见 feetech_bus.configure）
         self.bus.configure(gripper_id=MOTOR_IDS["gripper"])
         self._connected = True
+        self._torque_on = True          # configure 流程结束即位置环使能
 
     def disconnect(self) -> None:
         """禁用扭矩并关闭串口"""
@@ -270,10 +285,24 @@ class SO101Arm(HardwareModule):
 
     def write_positions(self, angles_rad: np.ndarray) -> None:
         """SYNC_WRITE 批量写入 6 个关节角度（弧度，标定限位 clamp）"""
+        self._ensure_torque()
         raws = {sid: self._rad_to_raw(sid, angles_rad[sid - 1])
                 for sid in range(1, 7)}
         self.bus.sync_write("Goal_Position", raws)
         self._last_cmd_angles = np.asarray(angles_rad, dtype=float).copy()
+
+    def _ensure_torque(self) -> None:
+        """运动前确保位置环使能（含重力保持模式恢复）。
+
+        - 重力补偿保持中（J2/J3 处于 PWM 模式）→ 先恢复 POSITION 模式；
+        - 失能状态 → 重新使能（feetech_bus.enable_torque 自带
+          Present→Goal 对齐，防突跳）。
+        """
+        if self._gravity_hold_on:
+            self.gravity_hold(False)
+        if not self._torque_on:
+            self.bus.enable_torque()
+            self._torque_on = True
 
     # ------------------------------------------------------------------
     # 运动控制
@@ -415,12 +444,68 @@ class SO101Arm(HardwareModule):
 
         self._last_cmd_angles = target.copy()
 
+        # 安全规范：归零到位即解除位置环堵转（修复"回零后仍使能"长期 bug）。
+        #   gravity_comp 开启 → J2/J3 进入 PWM 重力补偿保持（降发热降能耗）；
+        #   未开启           → 直接失能（1:345 减速比 + 摩擦自锁保持零位）。
+        # 任一情况下，下一次运动（write_positions/_ensure_torque）都会自动
+        # 重新使能并做 Present→Goal 对齐，不会突跳。
+        if self.gravity_comp_enabled:
+            self.gravity_hold(True)
+        self.bus.disable_torque()
+        self._torque_on = False
+        logger.info("已归零并按安全规范失能%s",
+                    "（重力补偿保持中）" if self._gravity_hold_on else "")
+
+    def gravity_hold(self, on: bool, pwm_map: Optional[Dict[int, int]] = None) -> None:
+        """重力补偿保持模式（任务 2）：承重关节切 PWM 开环前馈。
+
+        原理：位置模式下舵机位置环持续输出大电流对抗重力 → 发热/能耗；
+        切 MODE_PWM(2) 后由 Goal_PWM（占空比 -1000~+1000，±100%）直接
+        输出静态重力前馈，位置环不再做功 → 发热显著降低。
+
+        Args:
+            on: True=进入重力补偿保持；False=恢复全部 POSITION 模式并重使能
+            pwm_map: {motor_id: pwm}，各承重关节的前馈占空比。
+                     缺省读 self._gravity_pwm_map（settings.GRAVITY_COMP_PWM_MAP）。
+                     标定方法见 docs/gravity_comp_标定与验证.md。
+
+        只对承重主关节 J2(shoulder_lift)/J3(elbow_flex) 生效；
+        其余关节重力矩可忽略，保持位置使能。
+        """
+        ids = [2, 3]
+        if on:
+            pwm = dict(pwm_map or self._gravity_pwm_map or {})
+            present = self.bus.sync_read("Present_Position")
+            if present:
+                self.bus.sync_write("Goal_Position", present, num_retry=1)
+            self.bus.disable_torque()                     # Torque=0 + Lock=0
+            for mid in ids:
+                self.bus.write("Operating_Mode", mid, MODE_PWM, num_retry=1)
+            # 其余关节保持位置使能（腕部重力矩小，失能会下垂）
+            others = [m for m in self.bus.motor_ids if m not in ids]
+            self.bus.enable_torque(others)
+            # 写重力前馈（PWM 模式下 48 号寄存器 = Goal_PWM）
+            self.bus.write_goal_pwm({mid: int(pwm.get(mid, 0)) for mid in ids})
+            for mid in ids:
+                self.bus.write("Torque_Enable", mid, 1, num_retry=1)
+            self._gravity_hold_on = True
+            logger.info("重力补偿保持: J2/J3 → PWM 前馈 %s", pwm)
+        else:
+            self.bus.disable_torque()
+            for mid in ids:
+                self.bus.write("Operating_Mode", mid, MODE_POSITION, num_retry=1)
+            self._gravity_hold_on = False
+            self.bus.enable_torque()                      # Present→Goal 对齐防突跳
+            logger.info("重力补偿保持解除,已恢复位置模式")
+
     def emergency_stop(self) -> None:
         """急停 — 禁用所有舵机扭矩"""
         try:
             self.bus.disable_torque()
         except Exception as e:
             logger.error("急停禁扭矩失败: %s", e)
+        self._torque_on = False
+        self._gravity_hold_on = False
         self._connected = False
         logger.warning("Emergency stop triggered")
 

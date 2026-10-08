@@ -52,8 +52,10 @@ HOMOGRAPHY = REPO / "config" / "homography.json"
 
 #: 方块高度（米）。3D 打印方块实测边长 ~2 cm（P0-b 图像测得 ~39 px）
 CUBE_H_M = 0.020
-#: 夹取时 TCP 的 z（米）。TCP=夹爪中心（gripper_frame_link，即两指之间的抓取点），
-#: 要让两指跨在方块中部 → TCP z ≈ 方块半高。**必须实测确认**（--approach-only）。
+#: 夹取时 TCP 的 z（米）。TCP=夹爪中心（gripper_frame_link，即两指之间的抓取点）。
+#: 实测标定：悬空闭合时两指从 946 计数顺畅闭到 56 计数、负载仅 ~3%（夹住 2cm 方块
+#: 应被撑在 ~380 计数上），说明 z=0.020 时两指**还在方块顶面之上**、夹的是空气。
+#: 由 P0 几何（指尖比 TCP 低约 11 mm，TCP=0.011 时指尖贴桌）推得可用抓取高度 ≈0.012。
 GRASP_Z = 0.012
 #: 抬升/搬运高度
 LIFT_Z = 0.10
@@ -154,7 +156,7 @@ def gripper_open_counts(arm):
 
 def close_until_grasp(arm, contact_load=GRASP_LOAD, w_start=0.055, w_min=0.003,
                       step=0.004, settle=0.55, backoff=0.003,
-                      min_open_counts=90):
+                      min_open_counts=250):
     """逐步闭合直到夹到东西，随后**回退一点**避免持续堵转。
 
     判据用**两个独立量的与**：
@@ -517,6 +519,12 @@ def cmd_approach(kin, args) -> int:
             cam, cal.get("marker_kind", "panel"), cal.get("marker_color"),
             expect_px=px_pred, ref_area=ref_area, max_jump_px=args.track_gate_px)
         print("\n=== 接近结果 ===")
+        if args.snap:
+            # 存一张**抓取位姿的原始帧**：直接看两指相对方块的位置，
+            # 终结「指尖到 TCP 的垂直距离」这个一直被间接推断、且已被证伪的假设
+            args.snap.parent.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(args.snap), cv2.cvtColor(cam.grab(), cv2.COLOR_RGB2BGR))
+            print("  抓取位姿原始帧 → %s" % args.snap)
         if marker_px is None:
             print("  ✗ 到位后看不到标记（类型 %s）%s" % (cal.get("marker_kind"), info or ""))
             return 2

@@ -171,6 +171,9 @@ class VoiceAssistant(Module):
 
             logger.info(f"识别文本: {text}")
             intent, params = self._route(text)
+            if intent == "handled":
+                # 编排分支已在 _route 内逐个回调完成
+                continue
             if self._on_intent is not None:
                 try:
                     self._on_intent(intent, params)
@@ -194,9 +197,39 @@ class VoiceAssistant(Module):
         if not t:
             return "ask", {"question": ""}
 
-        # 1. 急停（最高优先级）
+        # 1. 急停（最高优先级,不经过 LLM,保证即时性）
         if any(k in t for k in _STOP_KEYWORDS) or t in ("停", "停一下"):
             return "stop", {}
+
+        # 1.5 LLM 意图编排(vlm_arm 函数清单模式):
+        #     用 RKLLM 语义理解替代关键词枚举,解决"同一个动作有无数种说法"
+        #     的语言多样性 bug;多步指令拆解为意图序列逐个回调。
+        #     编排失败/空序列自动回落下方关键词路由(原行为不变)。
+        try:
+            from voice.agent_plan import route_from_text, load_actions
+            motion_names = list(load_actions().keys())
+            steps, response = route_from_text(self._config or {}, t, motion_names)
+        except Exception as e:
+            logger.warning(f"意图编排异常,回落关键词路由: {e}")
+            steps, response = [], ""
+
+        if steps:
+            # 逐个回调意图(阻塞式:抓取本身耗时长,与单步原行为一致)
+            for idx, step in enumerate(steps, 1):
+                intent = step.get("intent", "")
+                logger.info(f"[编排] 第 {idx}/{len(steps)} 步: {intent} "
+                            f"{step.get('target') or step.get('name') or ''}")
+                if response and idx == 1 and self._on_intent is not None:
+                    # 首步前播报话术
+                    self.say(response)
+                if self._on_intent is None:
+                    continue
+                try:
+                    self._on_intent(intent, step)
+                except Exception as e:
+                    logger.error(f"[编排] 意图 {intent} 执行异常: {e}")
+            if self._on_intent is not None:
+                return "handled", {"steps": steps}
 
         # 2. 归零 / 复位
         if any(k in t for k in _HOME_KEYWORDS):

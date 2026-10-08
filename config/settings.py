@@ -18,6 +18,14 @@ CAMERA_POSITION = np.array([0.182, -0.129, 0.47], dtype=float)  # [x, y, z] 标�
 
 # ── 串口配置 ──
 SERIAL_PORT = "/dev/ttyACM0"
+
+# ── 重力补偿保持（任务: 降低静态保持发热/能耗）──
+# 开启后 home() 归零到位自动进入 PWM 开环重力前馈保持（J2/J3），
+# 替代"位置环堵转保持"；关闭则归零到位直接失能（1:345 减速比自锁保持）。
+# PWM_MAP 为各关节重力前馈占空比（-1000~+1000，±100%），
+# 由标定程序实测填入（见 docs/gravity_comp_标定与验证.md）。
+GRAVITY_COMP_ENABLED = False
+GRAVITY_COMP_PWM_MAP = {2: 0, 3: 0}   # motor_id 2=shoulder_lift, 3=elbow_flex
 SERIAL_BAUD = 1000000
 # 舵机标定文件路径 (refactor_plan_v9 §6.5)
 SERVO_CALIB = "./config/calibration.json"
